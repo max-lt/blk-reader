@@ -1,0 +1,25 @@
+{
+  "cSpell.words": [
+    "bincode",
+    "blockdata",
+    "blockhash",
+    "CHECKSIG",
+    "chrono",
+    "EQUALVERIFY",
+    "pubkey",
+    "PUSHBYTES",
+    "rocksdb",
+    "satoshis",
+    "sats",
+    "Secp",
+    "segwit",
+    "txdata",
+    "txid",
+    "txin",
+    "txout",
+    "utxo",
+    "utxos",
+    "vout",
+    "wpkh"
+  ]
+}
