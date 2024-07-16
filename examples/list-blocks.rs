@@ -13,7 +13,7 @@ struct Args {
     path: std::path::PathBuf,
 
     /// Maximum number of blocks to read
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 653792)]
     max_blocks: u32,
 
     /// Maximum number of block files to read
