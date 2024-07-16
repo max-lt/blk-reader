@@ -20,7 +20,7 @@ cargo run --example <example-name> /path/to/blk/dir <args>
 
 ### list-blocks
 
-Usage: `list-blocks <blk-dir> [--max-blocks <max-blocks>] [--max-files <start-block>]`
+Usage: `list-blocks <blk-dir> [--max-blocks <max-blocks>] [--max-files <max-block-files>]`
 
 ```bash
 list-blocks /path/to/blk/dir --max-blocks 10
