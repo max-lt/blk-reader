@@ -6,6 +6,8 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
@@ -43,6 +45,7 @@ pub struct BlockReader<'call> {
 pub struct BlockReaderOptions {
     pub max_blocks: u32,
     pub max_blk_files: usize,
+    pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for BlockReaderOptions {
@@ -50,6 +53,7 @@ impl Default for BlockReaderOptions {
         BlockReaderOptions {
             max_blocks: 1_000,
             max_blk_files: 10_000,
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -115,6 +119,12 @@ impl<'a> BlockReader<'a> {
             let block = Block::consensus_decode(&mut block_reader).unwrap();
             let time = block.header.time as i64;
             self.insert(block);
+
+            // Stop signal received
+            if self.options.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                println!("Stop signal received");
+                return Ok(false);
+            }
 
             // We reached the limit of blocks, stop here
             if self.height == self.options.max_blocks {

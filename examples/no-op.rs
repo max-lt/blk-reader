@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use blk_reader::BlockReader;
 use blk_reader::BlockReaderOptions;
 
@@ -34,7 +36,11 @@ fn main() -> Result<(), std::io::Error> {
     let options = BlockReaderOptions {
         max_blocks: args.max_blocks,
         max_blk_files: args.max_blk_files,
+        ..Default::default()
     };
+
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
 
     let mut reader = BlockReader::new(
         options,
