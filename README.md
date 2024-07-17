@@ -1,6 +1,14 @@
 # blk-reader
 Efficiently read and extract data from Bitcoin Core blk files.
 
+## Pre-requisites
+
+In order to run the examples, you need to have the blk files from the Bitcoin Core data directory and edit the permissions to allow the current user to read the files.
+
+```bash
+sudo chmod 664 /path/to/blk/dir/blk*
+```
+
 ## Examples
 
 To build examples, run:

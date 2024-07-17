@@ -14,12 +14,16 @@ struct Args {
     #[arg(value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     path: std::path::PathBuf,
 
+    /// Maximum number of orphans to keep in memory
+    #[arg(long, default_value_t = 10_000)]
+    max_orphans: usize,
+
     /// Maximum number of blocks to read
-    #[arg(long, default_value_t = 653792)]
+    #[arg(long, default_value_t = 850_150)]
     max_blocks: u32,
 
     /// Maximum number of block files to read
-    #[arg(long = "max-files", default_value_t = 10_000)]
+    #[arg(long = "max-files", default_value_t = 0)]
     max_blk_files: usize,
 }
 
@@ -35,8 +39,9 @@ fn main() -> Result<(), std::io::Error> {
     );
 
     let options = BlockReaderOptions {
-        max_blocks: args.max_blocks,
-        max_blk_files: args.max_blk_files,
+        max_blocks: if args.max_blocks == 0 { None } else { Some(args.max_blocks) },
+        max_blk_files: if args.max_blk_files == 0 { None } else { Some(args.max_blk_files) },
+        max_orphans: if args.max_orphans == 0 { None } else { Some(args.max_orphans) },
         ..Default::default()
     };
 

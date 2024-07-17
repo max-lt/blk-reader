@@ -1,7 +1,8 @@
 use bitcoin::ScriptBuf;
 use bitcoin::Address;
+use bitcoin::Network;
 
-use crate::constants::NETWORK;
+static NETWORK: Network = Network::Bitcoin;
 
 #[derive(PartialEq)]
 pub enum ScriptType {
@@ -13,6 +14,8 @@ pub enum ScriptType {
   P2TR,
   Empty,
   OpReturn,
+  Multisig,
+  WitnessProgram,
   Unknown,
 }
 
@@ -50,10 +53,20 @@ impl From<&ScriptBuf> for ScriptType {
           return ScriptType::OpReturn;
       }
 
+      if script.is_multisig() {
+          return ScriptType::Multisig;
+      }
+
+      if script.is_witness_program() {
+          return ScriptType::WitnessProgram;
+      }
+
       ScriptType::Unknown
   }
 }
 
+
+// https://github.com/bitcoin/bitcoin/blob/master/src/addresstype.cpp#L49
 impl ToString for ScriptType {
   fn to_string(&self) -> String {
       match self {
@@ -65,6 +78,8 @@ impl ToString for ScriptType {
           ScriptType::P2TR => "P2TR".to_string(),
           ScriptType::Empty => "Empty".to_string(),
           ScriptType::OpReturn => "OpReturn".to_string(),
+          ScriptType::Multisig => "MultiSig".to_string(),
+          ScriptType::WitnessProgram => "WitnessProgram".to_string(),
           ScriptType::Unknown => "UNKNOWN".to_string(),
       }
   }

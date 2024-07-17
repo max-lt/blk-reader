@@ -1,5 +1,4 @@
 mod block;
-mod constants;
 mod script;
 
 pub use block::BlockReader;
@@ -10,3 +9,7 @@ pub use script::pretty_print_script;
 
 // Re-export chrono types
 pub type DateTime = chrono::DateTime<chrono::Utc>;
+
+pub (crate) fn time_str(time: DateTime) -> String {
+    time.to_string().replace(" UTC", "")  
+}
