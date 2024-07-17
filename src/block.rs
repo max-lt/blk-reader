@@ -15,11 +15,12 @@ use bitcoin::p2p::Magic;
 use bitcoin::Block;
 use bitcoin::BlockHash;
 
-use crate::constants::MAGIC;
-use crate::constants::MAX_ORPHAN_BLOCKS;
+static MAGIC: Magic = Magic::BITCOIN;
 
-use chrono::Utc;
 use chrono::DateTime;
+use chrono::Utc;
+
+use crate::time_str;
 
 fn block_time(time: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(time, 0).unwrap()
@@ -43,16 +44,18 @@ pub struct BlockReader<'call> {
 }
 
 pub struct BlockReaderOptions {
-    pub max_blocks: u32,
-    pub max_blk_files: usize,
+    pub max_blocks: Option<u32>,
+    pub max_orphans: Option<usize>,
+    pub max_blk_files: Option<usize>,
     pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for BlockReaderOptions {
     fn default() -> Self {
         BlockReaderOptions {
-            max_blocks: 1_000,
-            max_blk_files: 10_000,
+            max_blocks: Some(1_000),
+            max_orphans: Some(10_000),
+            max_blk_files: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -60,8 +63,9 @@ impl Default for BlockReaderOptions {
 
 impl<'a> BlockReader<'a> {
     pub fn new(
-            options: BlockReaderOptions,
-        block_cb: Box<dyn Fn(Block, u32) + 'a>) -> BlockReader<'a> {
+        options: BlockReaderOptions,
+        block_cb: Box<dyn Fn(Block, u32) + 'a>,
+    ) -> BlockReader<'a> {
         BlockReader {
             height: 0,
             last_block_hash: BlockHash::all_zeros(),
@@ -72,7 +76,7 @@ impl<'a> BlockReader<'a> {
     }
 
     /// Read the directory and return a list of files
-    fn read_dir(& self, dir_path: &std::path::Path) -> Result<Vec<String>, Error> {
+    fn read_dir(&self, dir_path: &std::path::Path) -> Result<Vec<String>, Error> {
         let mut entries: Vec<String> = fs::read_dir(dir_path)?
             .filter_map(Result::ok)
             .map(|d| d.path())
@@ -83,7 +87,10 @@ impl<'a> BlockReader<'a> {
 
         entries.sort();
 
-        entries.truncate(self.options.max_blk_files);
+        match self.options.max_blk_files {
+            Some(max_blk_files) => entries.truncate(max_blk_files),
+            None => (),
+        }
 
         return Ok(entries);
     }
@@ -91,7 +98,7 @@ impl<'a> BlockReader<'a> {
     /// Read blocks from a file and insert them into the index
     /// Return true if there are more blocks to read, false if we reached the end of the file
     fn read_blocs(&mut self, file_path: &str) -> Result<bool, Error> {
-        println!("Open file {} {}", file_path, system_time());
+        println!("{} read {}", time_str(system_time()), file_path);
 
         let file = File::open(file_path)?;
         let file_size = file.metadata().unwrap().len();
@@ -121,19 +128,23 @@ impl<'a> BlockReader<'a> {
             self.insert(block);
 
             // Stop signal received
-            if self.options.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            if self
+                .options
+                .stop_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 println!("Stop signal received");
                 return Ok(false);
             }
 
             // We reached the limit of blocks, stop here
-            if self.height == self.options.max_blocks {
+            if self.max_height_reached() {
                 println!("Reached limit of blocks {}", self.height);
                 return Ok(false);
             }
 
             // We reached the limit of orphan blocks, stop here
-            if self.orphans.len() >= MAX_ORPHAN_BLOCKS {
+            if self.max_orphans_reached() {
                 println!("Reached limit of orphan blocks {}", self.orphans.len());
                 return Ok(false);
             }
@@ -141,10 +152,12 @@ impl<'a> BlockReader<'a> {
             // End of file, there are more blocks to read in the next file
             if offset >= file_size {
                 println!(
-                    "Done read {} {} {}",
+                    "{} done {} {} {} orphans={}",
+                    time_str(system_time()),
                     file_path,
                     self.height,
-                    block_time(time)
+                    time_str(block_time(time)),
+                    self.orphans()
                 );
                 return Ok(true);
             }
@@ -161,7 +174,7 @@ impl<'a> BlockReader<'a> {
 
         // This new block is now the tail of the chain
         self.push_block(block);
-        if self.height == self.options.max_blocks {
+        if self.max_height_reached() {
             return;
         }
 
@@ -172,7 +185,7 @@ impl<'a> BlockReader<'a> {
             };
 
             self.push_block(block);
-            if self.height == self.options.max_blocks {
+            if self.max_height_reached() {
                 return;
             }
         }
@@ -190,7 +203,7 @@ impl<'a> BlockReader<'a> {
         let entries = BlockReader::read_dir(&self, dir_path)?;
 
         for entry in entries {
-            if self.height == self.options.max_blocks {
+            if self.max_height_reached() {
                 break;
             }
 
@@ -210,5 +223,19 @@ impl<'a> BlockReader<'a> {
     /// Return the height of the last block
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    fn max_height_reached(&self) -> bool {
+        match self.options.max_blocks {
+            Some(max_blocks) => self.height >= max_blocks,
+            None => false            
+        }
+    }
+
+    fn max_orphans_reached(&self) -> bool {
+        match self.options.max_orphans {
+            Some(max_orphans) => self.orphans.len() >= max_orphans,
+            None => false
+        }
     }
 }

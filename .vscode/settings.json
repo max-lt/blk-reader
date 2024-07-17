@@ -5,6 +5,7 @@
     "blockhash",
     "CHECKSIG",
     "chrono",
+    "consts",
     "EQUALVERIFY",
     "pubkey",
     "PUSHBYTES",

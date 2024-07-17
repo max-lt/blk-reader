@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 
+use bitcoin::Amount;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use blk_reader::BlockReader;
@@ -18,13 +19,21 @@ struct Args {
     #[arg(value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     path: std::path::PathBuf,
 
+    /// Maximum number of orphans to keep in memory
+    #[arg(long, default_value_t = 10_000)]
+    max_orphans: usize,
+
     /// Maximum number of blocks to read
-    #[arg(long, default_value_t = 653792)]
+    #[arg(long, default_value_t = 850_150)]
     max_blocks: u32,
 
     /// Maximum number of block files to read
-    #[arg(long = "max-files", default_value_t = 10_000)]
+    #[arg(long = "max-files", default_value_t = 0)]
     max_blk_files: usize,
+
+    /// Ignore empty outputs
+    #[arg(long = "ignore-empty", default_value_t = false)]
+    ignore_empty: bool,
 }
 
 struct UnknownScriptData {
@@ -45,8 +54,9 @@ fn main() -> Result<(), std::io::Error> {
     );
 
     let options = BlockReaderOptions {
-        max_blocks: args.max_blocks,
-        max_blk_files: args.max_blk_files,
+        max_blocks: if args.max_blocks == 0 { None } else { Some(args.max_blocks) },
+        max_blk_files: if args.max_blk_files == 0 { None } else { Some(args.max_blk_files) },
+        max_orphans: if args.max_orphans == 0 { None } else { Some(args.max_orphans) },
         ..Default::default()
     };
 
@@ -101,14 +111,18 @@ fn main() -> Result<(), std::io::Error> {
     println!("Done reading blocks, writing {} outputs to {}", non_standard.len(), filename);
 
     for ((txid, vout), data) in non_standard.iter() {
+        if args.ignore_empty && data.output.value == Amount::ZERO {
+            continue;
+        }
+
         file.write_all(
             format!(
-                "{}; {}; {}:{}; {}; \"{}\"\n",
-                blk_reader::DateTime::from_timestamp(data.time as i64, 0).unwrap(),
-                data.height - 1,
+                "{}; {}; {}:{}; {}; {}\n",
+                blk_reader::DateTime::from_timestamp(data.time as i64, 0).unwrap().to_string().replace(" UTC", ""),
+                data.height,
                 txid,
                 vout,
-                data.output.value,
+                data.output.value.to_btc(),
                 data.output.script_pubkey.to_string()
             )
             .as_bytes(),

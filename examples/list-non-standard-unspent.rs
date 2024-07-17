@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 
-// use bitcoin::ScriptBuf;
+use bitcoin::Amount;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use blk_reader::BlockReader;
@@ -19,13 +20,21 @@ struct Args {
     #[arg(value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     path: std::path::PathBuf,
 
+    /// Maximum number of orphans to keep in memory
+    #[arg(long, default_value_t = 10_000)]
+    max_orphans: usize,
+
     /// Maximum number of blocks to read
-    #[arg(long, default_value_t = 653792)]
+    #[arg(long, default_value_t = 850_150)]
     max_blocks: u32,
 
     /// Maximum number of block files to read
-    #[arg(long = "max-files", default_value_t = 10_000)]
+    #[arg(long = "max-files", default_value_t = 0)]
     max_blk_files: usize,
+
+    /// Ignore empty outputs
+    #[arg(long = "ignore-empty", default_value_t = false)]
+    ignore_empty: bool,
 }
 
 struct UnknownScriptData {
@@ -34,28 +43,7 @@ struct UnknownScriptData {
     output: TxOut,
 }
 
-// Usage: cargo run --example list-non-standard-txs -- --max-blocks 1000 --max-files 10 /path/to/blocks
-fn main() -> Result<(), std::io::Error> {
-    let args = Args::parse();
-
-    println!(
-        "Reading blocks from: {} (max blocks: {}, max blk files: {})",
-        args.path.to_string_lossy(),
-        args.max_blocks,
-        args.max_blk_files
-    );
-
-    let options = BlockReaderOptions {
-        max_blocks: args.max_blocks,
-        max_blk_files: args.max_blk_files,
-        ..Default::default()
-    };
-
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
-
-    let filename = "non-standard-unspent-txs.csv";
-
+fn prepare_file(filename: &str) -> File {
     // Delete file if it exists
     std::fs::remove_file(filename).unwrap_or_default();
 
@@ -69,14 +57,70 @@ fn main() -> Result<(), std::io::Error> {
     file.write_all(format!("sep=;\n\"Block Time\"; Block; Tx:Vout; Value; Script\n").as_bytes())
         .unwrap();
 
-    let unknown: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
+    file
+}
 
-    let unknown = std::cell::RefCell::new(unknown);
+fn write_data(
+    file: &mut File,
+    data: &BTreeMap<(Txid, u32), UnknownScriptData>,
+    ignore_empty: bool,
+) {
+    for ((txid, vout), data) in data.iter() {
+        if ignore_empty && data.output.value == Amount::ZERO {
+            continue;
+        }
+
+        file.write_all(
+            format!(
+                "{}; {}; {}:{}; {}; {}\n",
+                blk_reader::DateTime::from_timestamp(data.time as i64, 0)
+                    .unwrap()
+                    .to_string()
+                    .replace(" UTC", ""),
+                data.height,
+                txid,
+                vout,
+                data.output.value.to_btc(),
+                data.output.script_pubkey.to_string()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    }
+}
+
+// Usage: cargo run --example list-non-standard-txs -- --max-blocks 1000 --max-files 10 /path/to/blocks
+fn main() -> Result<(), std::io::Error> {
+    let args = Args::parse();
+
+    println!("Reading blocks: {:?}", args);
+
+    let options = BlockReaderOptions {
+        max_blocks: if args.max_blocks == 0 { None } else { Some(args.max_blocks) },
+        max_blk_files: if args.max_blk_files == 0 { None } else { Some(args.max_blk_files) },
+        max_orphans: if args.max_orphans == 0 { None } else { Some(args.max_orphans) },
+        ..Default::default()
+    };
+
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
+
+    let unspent_filename = "non-standard-unspent.csv";
+    let spent_filename = "non-standard-spent.csv";
+
+    let mut unspent_file = prepare_file(unspent_filename);
+    let mut spent_file = prepare_file(spent_filename);
+
+    let unspent: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
+    let spent: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
+
+    let unspent = std::cell::RefCell::new(unspent);
+    let spent = std::cell::RefCell::new(spent);
 
     let mut reader = BlockReader::new(
         options,
         Box::new(|block, height| {
-            let mut unknown = unknown.borrow_mut();
+            let mut unspent = unspent.borrow_mut();
 
             for tx in block.txdata.iter() {
                 for input in tx.input.iter() {
@@ -88,8 +132,10 @@ fn main() -> Result<(), std::io::Error> {
                     }
 
                     // Remove spent unknown script
-                    match unknown.remove(&key) {
-                        Some(_) => {}
+                    match unspent.remove(&key) {
+                        Some(value) => {
+                            spent.borrow_mut().insert(key, value);
+                        }
                         None => {}
                     }
                 }
@@ -100,7 +146,7 @@ fn main() -> Result<(), std::io::Error> {
                     if script_type == ScriptType::Unknown {
                         let key = (tx.compute_txid(), vout as u32);
 
-                        unknown.insert(
+                        unspent.insert(
                             key,
                             UnknownScriptData {
                                 time: block.header.time,
@@ -116,23 +162,15 @@ fn main() -> Result<(), std::io::Error> {
 
     reader.read(&args.path)?;
 
-    println!("Done reading blocks, writing non-standard-non-empty-txs.csv");
+    println!("Done reading blocks");
 
-    for ((txid, vout), data) in unknown.borrow().iter() {
-        file.write_all(
-            format!(
-                "{}; {}; {}:{}; {}; \"{}\"\n",
-                blk_reader::DateTime::from_timestamp(data.time as i64, 0).unwrap(),
-                data.height - 1,
-                txid,
-                vout,
-                data.output.value,
-                data.output.script_pubkey.to_string()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    }
+    let unspent = unspent.borrow();
+    println!("Writing {} items into {}", unspent.len(), unspent_filename);
+    write_data(&mut unspent_file, &unspent, args.ignore_empty);
+
+    let spent = spent.borrow();
+    println!("Writing {} items into {}", spent.len(), spent_filename);
+    write_data(&mut spent_file, &spent, args.ignore_empty);
 
     Ok(())
 }
