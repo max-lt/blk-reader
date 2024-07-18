@@ -9,10 +9,16 @@ pub trait GetBlockIds<Identifier> {
 }
 
 #[derive(Debug, Clone)]
+enum NextNode<Data> {
+    Single(Rc<RefCell<Node<Data>>>),
+    Multiple(Vec<Rc<RefCell<Node<Data>>>>),
+}
+
+#[derive(Debug, Clone)]
 pub struct Node<Data> {
-    pub block: Option<Data>,
-    pub prev: Option<Rc<RefCell<Node<Data>>>>,
-    pub next: Option<Vec<Rc<RefCell<Node<Data>>>>>,
+    block: Option<Data>,
+    prev: Option<Rc<RefCell<Node<Data>>>>,
+    next: Option<NextNode<Data>>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +33,14 @@ pub struct Chain<I, D> {
 impl<D> Node<D> {
     fn add_next(&mut self, node: Rc<RefCell<Node<D>>>) {
         match &mut self.next {
-            Some(next) => next.push(node),
-            None => self.next = Some(vec![node]),
+            Some(next) => match next {
+                NextNode::Single(next) => {
+                    let nodes = vec![next.clone(), node.clone()];
+                    self.next = Some(NextNode::Multiple(nodes));
+                }
+                NextNode::Multiple(nodes) => nodes.push(node),
+            },
+            None => self.next = Some(NextNode::Single(node)),
         }
     }
 
@@ -54,13 +66,21 @@ impl<D> Node<D> {
     // Extract all nodes recursively from the current node to the tails
     fn extract_right(node: Rc<RefCell<Node<D>>>) -> Vec<Rc<RefCell<Node<D>>>> {
         match &node.borrow().next {
-            Some(next) => {
-                let mut nodes = vec![Rc::clone(&node)];
-                for n in next.iter() {
-                    nodes.extend(Node::extract_right(Rc::clone(n)));
+            Some(next) => match next {
+                NextNode::Single(next) => {
+                    let mut nodes = Node::extract_right(Rc::clone(next));
+                    nodes.push(Rc::clone(&node));
+                    nodes
                 }
-                nodes
-            }
+                NextNode::Multiple(nodes) => {
+                    let mut all_nodes = vec![Rc::clone(&node)];
+                    for next in nodes.iter() {
+                        let mut nodes = Node::extract_right(Rc::clone(next));
+                        all_nodes.append(&mut nodes);
+                    }
+                    all_nodes
+                }
+            },
             None => vec![Rc::clone(&node)],
         }
     }
@@ -113,8 +133,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         let block_hash = block.get_block_id();
         let prev_hash = block.get_block_prev_id();
 
-        // println!("Insert block  {} (prev: {})", block_hash, prev_hash);
-
         // This is the genesis block
         if self.head.is_none() && prev_hash == self.genesis_identifier {
             let node = Rc::new(RefCell::new(Node {
@@ -144,8 +162,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                     next: None,
                 }));
 
-                // node.prev = Some(parent_node.clone());
-
                 // Add the new node to the parent's next list
                 parent_node.borrow_mut().add_next(node.clone());
 
@@ -162,21 +178,18 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
             }
         };
 
-        // // We inserted a new block, check if we can insert any orphans
+        // We inserted a new block, check if we can insert any orphans
         match self.orphans.remove(&block_hash) {
-            Some(orphan) => {
-                // println!(
-                //     "Insert orphan {} (prev: {})",
-                //     orphan.get_block_id(),
-                //     block_hash
-                // );
-                self.insert(orphan);
-            }
+            Some(orphan) => self.insert(orphan),
             None => {}
         };
     }
 
-    /// Pop head
+    /// Pop head: remove the head of the longest chain and return it
+    /// If the chain is empty, return None
+    /// If the chain has only one block, return the block and set the head to None
+    /// If the head has a single next node, set the head to the next node
+    /// If the head has multiple next nodes, remove all nodes except the next node from the longest chain 
     pub fn pop_head(&mut self) -> Option<D> {
         let longest_chain = self.longest_chain()?;
 
@@ -211,17 +224,13 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                 self.head = None;
                 return Some(head);
             }
-            Some(next_nodes) => match next_nodes.len() {
-                0 => {
-                    self.head = None;
+            Some(next_nodes) => match next_nodes {
+                NextNode::Single(node) => {
+                    self.head = Some(node.clone());
                     return Some(head);
                 }
-                1 => {
-                    self.head = Some(next);
-                    return Some(head);
-                }
-                _ => {
-                    for node in next_nodes.iter() {
+                NextNode::Multiple(nodes) => {
+                    for node in nodes.iter() {
                         // Continue if node is next
                         if Rc::ptr_eq(&next, node) {
                             println!(
