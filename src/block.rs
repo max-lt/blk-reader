@@ -5,9 +5,9 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Read;
 
-use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::vec;
 
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
@@ -20,7 +20,19 @@ static MAGIC: Magic = Magic::BITCOIN;
 use chrono::DateTime;
 use chrono::Utc;
 
+use crate::chain::Chain;
+use crate::chain::GetBlockIds;
 use crate::time_str;
+
+impl GetBlockIds<BlockHash> for Block {
+    fn get_block_id(&self) -> BlockHash {
+        self.block_hash()
+    }
+
+    fn get_block_prev_id(&self) -> BlockHash {
+        self.header.prev_blockhash
+    }
+}
 
 fn block_time(time: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(time, 0).unwrap()
@@ -37,8 +49,7 @@ fn system_time() -> chrono::DateTime<Utc> {
 
 pub struct BlockReader<'call> {
     height: u32,
-    last_block_hash: BlockHash,
-    orphans: BTreeMap<BlockHash, Block>,
+    chain: Chain<BlockHash, Block>,
     block_cb: Box<dyn Fn(Block, u32) + 'call>,
     options: BlockReaderOptions,
 }
@@ -68,8 +79,7 @@ impl<'a> BlockReader<'a> {
     ) -> BlockReader<'a> {
         BlockReader {
             height: 0,
-            last_block_hash: BlockHash::all_zeros(),
-            orphans: BTreeMap::new(),
+            chain: Chain::new(BlockHash::all_zeros()),
             block_cb: block_cb,
             options: options,
         }
@@ -145,7 +155,7 @@ impl<'a> BlockReader<'a> {
 
             // We reached the limit of orphan blocks, stop here
             if self.max_orphans_reached() {
-                println!("Reached limit of orphan blocks {}", self.orphans.len());
+                println!("Reached limit of orphan blocks {}", self.orphans());
                 return Ok(false);
             }
 
@@ -166,34 +176,23 @@ impl<'a> BlockReader<'a> {
 
     /// Insert a block into the index
     fn insert(&mut self, block: Block) {
-        // This new block not the next block in the chain, add it to the orphans
-        if self.last_block_hash != block.header.prev_blockhash {
-            self.orphans.insert(block.header.prev_blockhash, block);
-            return;
-        }
+        self.chain.insert(block);
 
-        // This new block is now the tail of the chain
-        self.push_block(block);
-        if self.max_height_reached() {
-            return;
-        }
-
-        loop {
-            let block = match self.orphans.remove(&self.last_block_hash) {
-                Some(block) => block,
-                None => break,
-            };
-
-            self.push_block(block);
-            if self.max_height_reached() {
-                return;
+        while self.chain.longest_chain_depth() >= 10 {
+            match self.chain.pop_head() {
+                Some(block) => {
+                    self.push_block(block);
+                    if self.max_height_reached() {
+                        return;
+                    }
+                }
+                None => return,
             }
-        }
+        };
     }
 
     fn push_block(&mut self, block: Block) {
         self.height += 1;
-        self.last_block_hash = block.block_hash();
 
         // Call the callback function
         (self.block_cb)(block, self.height);
@@ -217,7 +216,7 @@ impl<'a> BlockReader<'a> {
 
     /// Return the number of orphans blocks
     pub fn orphans(&self) -> usize {
-        self.orphans.len()
+        self.chain.orphans()
     }
 
     /// Return the height of the last block
@@ -228,14 +227,14 @@ impl<'a> BlockReader<'a> {
     fn max_height_reached(&self) -> bool {
         match self.options.max_blocks {
             Some(max_blocks) => self.height >= max_blocks,
-            None => false            
+            None => false,
         }
     }
 
     fn max_orphans_reached(&self) -> bool {
         match self.options.max_orphans {
-            Some(max_orphans) => self.orphans.len() >= max_orphans,
-            None => false
+            Some(max_orphans) => self.orphans() >= max_orphans,
+            None => false,
         }
     }
 }
