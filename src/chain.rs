@@ -24,7 +24,6 @@ pub struct Node<Data> {
 #[derive(Debug, Clone)]
 pub struct Chain<I, D> {
     head: Option<Rc<RefCell<Node<D>>>>,
-    tails: BTreeMap<I, Rc<RefCell<Node<D>>>>,
     nodes: BTreeMap<I, Rc<RefCell<Node<D>>>>,
     orphans: BTreeMap<I, D>,
     genesis_identifier: I,
@@ -44,9 +43,21 @@ impl<D> Node<D> {
         }
     }
 
-    fn depth(&self) -> u32 {
-        match &self.prev {
-            Some(prev) => prev.borrow().depth() + 1,
+    fn depth(node: Rc<RefCell<Node<D>>>) -> u32 {
+        match &node.borrow().next {
+            Some(next) => match next {
+                NextNode::Single(next) => 1 + Node::depth(Rc::clone(next)),
+                NextNode::Multiple(nodes) => {
+                    let mut max_depth = 0;
+                    for next in nodes.iter() {
+                        let depth = Node::depth(Rc::clone(next));
+                        if depth > max_depth {
+                            max_depth = depth;
+                        }
+                    }
+                    1 + max_depth
+                }
+            },
             None => 1,
         }
     }
@@ -84,6 +95,28 @@ impl<D> Node<D> {
             None => vec![Rc::clone(&node)],
         }
     }
+
+    /// Extract the tail of longest chain from the current node to the right
+    fn longest_right(node: Rc<RefCell<Node<D>>>) -> Rc<RefCell<Node<D>>> {
+        match &node.borrow().next {
+            Some(next) => match next {
+                NextNode::Single(next) => Rc::clone(next),
+                NextNode::Multiple(nodes) => {
+                    let mut max_depth = 0;
+                    let mut longest = Rc::clone(&node);
+                    for next in nodes.iter() {
+                        let depth = Node::depth(Rc::clone(next));
+                        if depth > max_depth {
+                            max_depth = depth;
+                            longest = Rc::clone(next);
+                        }
+                    }
+                    longest
+                }
+            },
+            None => Rc::clone(&node),
+        }
+    }
 }
 
 impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D> {
@@ -92,37 +125,33 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
             head: None,
             orphans: BTreeMap::new(),
             nodes: BTreeMap::new(),
-            tails: BTreeMap::new(),
             genesis_identifier,
         }
     }
 
     fn longest_chain(&self) -> Option<Rc<RefCell<Node<D>>>> {
-        let mut max_depth = 0;
-        let mut longest = None;
-
-        for (_id, node) in self.tails.iter() {
-            let depth = node.borrow().depth();
-            if depth > max_depth {
-                max_depth = depth;
-                longest = Some(node.clone());
-            }
+        match &self.head {
+            Some(head) => Some(Node::longest_right(Rc::clone(head))),
+            None => None,
         }
-
-        return longest;
     }
 
     pub fn longest_chain_depth(&self) -> u32 {
-        let mut max_depth = 0;
-
-        for (_id, node) in self.tails.iter() {
-            let depth = node.borrow().depth();
-            if depth > max_depth {
-                max_depth = depth;
-            }
+        match &self.head {
+            Some(head) => Node::depth(head.clone()),
+            None => 0,
         }
+    }
 
-        return max_depth;
+    fn tails(&self) -> Vec<Rc<RefCell<Node<D>>>> {
+        match &self.head {
+            Some(head) => Node::extract_right(Rc::clone(head))
+                .iter()
+                .filter(|node| node.borrow().next.is_none())
+                .map(|node| Rc::clone(node))
+                .collect(),
+            None => vec![],
+        }
     }
 
     pub fn orphans(&self) -> usize {
@@ -141,7 +170,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                 next: None,
             }));
 
-            self.tails.insert(block_hash, node.clone());
             self.nodes.insert(block_hash, node.clone());
             self.head = Some(node);
 
@@ -165,12 +193,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                 // Add the new node to the parent's next list
                 parent_node.borrow_mut().add_next(node.clone());
 
-                // If the parent node was a tail, it's no longer a tail
-                self.tails.remove(&prev_hash);
-
-                // Update the new node as a tail
-                self.tails.insert(block_hash, node.clone());
-
                 // Add the new node to the nodes map
                 self.nodes.insert(block_hash, node.clone());
 
@@ -189,7 +211,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
     /// If the chain is empty, return None
     /// If the chain has only one block, return the block and set the head to None
     /// If the head has a single next node, set the head to the next node
-    /// If the head has multiple next nodes, remove all nodes except the next node from the longest chain 
+    /// If the head has multiple next nodes, remove all nodes except the next node from the longest chain
     pub fn pop_head(&mut self) -> Option<D> {
         let longest_chain = self.longest_chain()?;
 
@@ -204,9 +226,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
 
         // Remove the head from the nodes map
         self.nodes.remove(&head_id);
-
-        // Remove the head from the tails map
-        self.tails.remove(&head_id);
 
         let next = match next {
             Some(next) => next,
@@ -245,7 +264,6 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                         for node in nodes.iter() {
                             let node_id = node.borrow().block.as_ref().unwrap().get_block_id();
                             println!("Removing node {}", node_id);
-                            self.tails.remove(&node_id);
                             self.nodes.remove(&node_id);
                         }
                     }
@@ -258,11 +276,13 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
     }
 }
 
-impl<I: std::fmt::Display, D: GetBlockIds<I>> std::fmt::Display for Chain<I, D> {
+impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> std::fmt::Display for Chain<I, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        println!("nTails: {}", self.tails.len());
+        let tails = self.tails();
 
-        for (_hash, tail) in self.tails.iter() {
+        println!("nTails: {}", tails.len());
+
+        for tail in tails {
             let nodes = Node::extract_left(tail.clone());
 
             writeln!(
