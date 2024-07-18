@@ -196,7 +196,7 @@ impl<'a> BlockReader<'a> {
         self.last_block_hash = block.block_hash();
 
         // Call the callback function
-        (self.block_cb)(block, self.height);
+        (self.block_cb)(block, self.height - 1);
     }
 
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {
