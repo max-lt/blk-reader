@@ -108,8 +108,6 @@ impl<'a> BlockReader<'a> {
     /// Read blocks from a file and insert them into the index
     /// Return true if there are more blocks to read, false if we reached the end of the file
     fn read_blocs(&mut self, file_path: &str) -> Result<bool, Error> {
-        println!("{} read {}", time_str(system_time()), file_path);
-
         let file = File::open(file_path)?;
         let file_size = file.metadata().unwrap().len();
 
