@@ -193,7 +193,7 @@ impl<'a> BlockReader<'a> {
         self.height += 1;
 
         // Call the callback function
-        (self.block_cb)(block, self.height);
+        (self.block_cb)(block, self.height - 1);
     }
 
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {
