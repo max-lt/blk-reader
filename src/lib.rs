@@ -1,3 +1,4 @@
+mod chain;
 mod block;
 mod script;
 
