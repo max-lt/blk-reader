@@ -84,6 +84,8 @@ fn main() -> Result<(), std::io::Error> {
     let mut reader = BlockReader::new(
         options,
         Box::new(|block, height| {
+            let block = block.decode().unwrap();
+
             for tx in block.txdata.iter() {
                 for (vout, output) in tx.output.iter().enumerate() {
                     let script_type = blk_reader::ScriptType::from(&output.script_pubkey);

@@ -51,8 +51,10 @@ fn main() -> Result<(), std::io::Error> {
     let mut reader = BlockReader::new(
         options,
         Box::new(|block, height| {
+            let block = block.decode().unwrap();
+
             println!(
-                "Block: {} {:6} {} {} transaction(s)",
+                "Block: {} {} {} {} transaction(s)",
                 block.block_hash(),
                 height,
                 DateTime::from_timestamp(block.header.time as i64, 0).unwrap(),

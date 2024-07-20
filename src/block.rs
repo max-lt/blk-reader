@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::vec;
 
+use bitcoin::block::Header;
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
@@ -17,6 +18,7 @@ use bitcoin::BlockHash;
 
 static MAGIC: Magic = Magic::BITCOIN;
 
+use bitcoin::Transaction;
 use chrono::DateTime;
 use chrono::Utc;
 
@@ -24,9 +26,23 @@ use crate::chain::Chain;
 use crate::chain::GetBlockIds;
 use crate::time_str;
 
-impl GetBlockIds<BlockHash> for Block {
+#[derive(Debug, Clone)]
+pub struct LazyBlock {
+    pub header: Header,
+    data: Vec<u8>,
+}
+
+impl LazyBlock {
+    pub fn decode(&self) -> Result<Block, bitcoin::consensus::encode::Error> {
+        let mut txdata: &[u8] = &self.data[..];
+        let txdata = Vec::<Transaction>::consensus_decode(&mut txdata)?;
+        Ok(Block { header: self.header, txdata })
+    }
+}
+
+impl GetBlockIds<BlockHash> for LazyBlock {
     fn get_block_id(&self) -> BlockHash {
-        self.block_hash()
+        self.header.block_hash()
     }
 
     fn get_block_prev_id(&self) -> BlockHash {
@@ -49,8 +65,8 @@ fn system_time() -> chrono::DateTime<Utc> {
 
 pub struct BlockReader<'call> {
     height: u32,
-    chain: Chain<BlockHash, Block>,
-    block_cb: Box<dyn Fn(Block, u32) + 'call>,
+    chain: Chain<BlockHash, LazyBlock>,
+    block_cb: Box<dyn Fn(LazyBlock, u32) + 'call>,
     options: BlockReaderOptions,
 }
 
@@ -75,13 +91,13 @@ impl Default for BlockReaderOptions {
 impl<'a> BlockReader<'a> {
     pub fn new(
         options: BlockReaderOptions,
-        block_cb: Box<dyn Fn(Block, u32) + 'a>,
+        block_cb: Box<dyn Fn(LazyBlock, u32) + 'a>,
     ) -> BlockReader<'a> {
         BlockReader {
             height: 0,
             chain: Chain::new(BlockHash::all_zeros()),
-            block_cb: block_cb,
-            options: options,
+            block_cb,
+            options,
         }
     }
 
@@ -124,16 +140,18 @@ impl<'a> BlockReader<'a> {
                 return Err(Error::new(ErrorKind::Other, "Magic is not correct"));
             }
 
-            // Limit reader to the block size
-            let mut data: Vec<u8> = vec![0; size];
-            reader.read_exact(&mut data).unwrap();
-            let mut block_reader: &[u8] = &data[..];
-
             offset += 4 + 4 + size as u64;
+            
+            // Read the block header
+            let header = Header::consensus_decode(&mut reader).unwrap();
+            let time = header.time as i64;
 
-            let block = Block::consensus_decode(&mut block_reader).unwrap();
-            let time = block.header.time as i64;
-            self.insert(block);
+            // Skip the rest of the block
+            let mut data = vec![0; size - 80];
+            reader.read_exact(&mut data).unwrap();
+
+            // Insert the block into the index
+            self.insert(LazyBlock { header, data });
 
             // Stop signal received
             if self
@@ -173,7 +191,7 @@ impl<'a> BlockReader<'a> {
     }
 
     /// Insert a block into the index
-    fn insert(&mut self, block: Block) {
+    fn insert(&mut self, block: LazyBlock) {
         self.chain.insert(block);
 
         while self.chain.longest_chain_depth() >= 10 {
@@ -186,14 +204,16 @@ impl<'a> BlockReader<'a> {
                 }
                 None => return,
             }
-        };
+        }
     }
 
-    fn push_block(&mut self, block: Block) {
+    fn push_block(&mut self, block: LazyBlock) {
+        let height = self.height;
+
         self.height += 1;
 
         // Call the callback function
-        (self.block_cb)(block, self.height - 1);
+        (self.block_cb)(block, height);
     }
 
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {
