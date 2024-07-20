@@ -2,6 +2,7 @@ mod chain;
 mod block;
 mod script;
 
+pub use block::LazyBlock;
 pub use block::BlockReader;
 pub use block::BlockReaderOptions;
 

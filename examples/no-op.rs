@@ -1,5 +1,4 @@
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use blk_reader::BlockReader;
@@ -49,20 +48,20 @@ fn main() -> Result<(), std::io::Error> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
 
-    let last_block = AtomicU32::new(0);
+    let last_block = RefCell::new(0);
 
     let mut reader = BlockReader::new(
         options,
         Box::new(|_block, height| {
             // Do nothing to evaluate time to read (and order) blocks
             // without any processing  
-            last_block.store(height, Ordering::Relaxed);
+            last_block.replace(height + 1);
         }),
     );
 
     reader.read(&args.path)?;
 
-    println!("Last block: {}", last_block.load(Ordering::Relaxed));
+    println!("Read {} blocks", last_block.borrow());
 
     Ok(())
 }

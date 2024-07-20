@@ -120,6 +120,8 @@ fn main() -> Result<(), std::io::Error> {
     let mut reader = BlockReader::new(
         options,
         Box::new(|block, height| {
+            let block = block.decode().unwrap();
+
             let mut unspent = unspent.borrow_mut();
 
             for tx in block.txdata.iter() {
