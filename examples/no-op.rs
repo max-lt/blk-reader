@@ -4,6 +4,7 @@ use std::sync::Arc;
 use blk_reader::BlockReader;
 use blk_reader::BlockReaderOptions;
 
+use blk_reader::LazyBlock;
 use clap::Parser;
 
 /// Simple program to iterate over all blocks in the blockchain
@@ -48,20 +49,27 @@ fn main() -> Result<(), std::io::Error> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
 
-    let last_block = RefCell::new(0);
+    let last_block_height = RefCell::new(0);
+    let last_block: RefCell<Option<LazyBlock>> = RefCell::new(None);
 
     let mut reader = BlockReader::new(
         options,
-        Box::new(|_block, height| {
+        Box::new(|block, height| {
             // Do nothing to evaluate time to read (and order) blocks
-            // without any processing  
-            last_block.replace(height + 1);
+            // without any processing
+            last_block_height.replace(height);
+            last_block.replace(Some(block));
         }),
     );
 
     reader.read(&args.path)?;
 
-    println!("Read {} blocks", last_block.borrow());
+    let last_block_height = last_block_height.take();
+    let last_block = last_block.take().unwrap();
+    let header = last_block.header;
+
+    println!("Read {} blocks", 1 + last_block_height);
+    println!("Last block: {} {}", last_block_height, header.block_hash());
 
     Ok(())
 }
