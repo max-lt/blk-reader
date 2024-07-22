@@ -165,7 +165,7 @@ impl<'a> BlockReader<'a> {
 
             // We reached the limit of blocks, stop here
             if self.max_height_reached() {
-                println!("Reached limit of blocks {}", self.height);
+                println!("Reached limit of blocks. Next block is {} {}", self.height, self.chain.next_id());
                 return Ok(false);
             }
 

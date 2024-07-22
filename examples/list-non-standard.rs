@@ -1,7 +1,10 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 
+use bitcoin::block::Header;
 use bitcoin::Amount;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -30,10 +33,6 @@ struct Args {
     /// Maximum number of block files to read
     #[arg(long = "max-files", default_value_t = 0)]
     max_blk_files: usize,
-
-    /// Ignore empty outputs
-    #[arg(long = "ignore-empty", default_value_t = false)]
-    ignore_empty: bool,
 }
 
 struct UnknownScriptData {
@@ -42,16 +41,57 @@ struct UnknownScriptData {
     output: TxOut,
 }
 
+fn prepare_file(filename: &str) -> File {
+    // Delete file if it exists
+    std::fs::remove_file(filename).unwrap_or_default();
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(filename)
+        .unwrap();
+
+    // Headers
+    file.write_all(format!("sep=;\n\"Block Time\"; Block; Tx:Vout; Value; Script\n").as_bytes())
+        .unwrap();
+
+    file
+}
+
+fn write_data(
+    file: &mut File,
+    data: &BTreeMap<(Txid, u32), UnknownScriptData>,
+    ignore_empty: bool,
+) {
+    for ((txid, vout), data) in data.iter() {
+        if ignore_empty && data.output.value == Amount::ZERO {
+            continue;
+        }
+
+        file.write_all(
+            format!(
+                "{}; {}; {}:{}; {}; {}\n",
+                blk_reader::DateTime::from_timestamp(data.time as i64, 0)
+                    .unwrap()
+                    .to_string()
+                    .replace(" UTC", ""),
+                data.height,
+                txid,
+                vout,
+                data.output.value.to_btc(),
+                data.output.script_pubkey.to_string()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    }
+}
+
 // Usage: cargo run --example list-non-standard-txs -- --max-blocks 1000 --max-files 10 /path/to/blocks
 fn main() -> Result<(), std::io::Error> {
     let args = Args::parse();
 
-    println!(
-        "Reading blocks from: {} (max blocks: {}, max blk files: {})",
-        args.path.to_string_lossy(),
-        args.max_blocks,
-        args.max_blk_files
-    );
+    println!("Reading blocks: {:?}", args);
 
     let options = BlockReaderOptions {
         max_blocks: if args.max_blocks == 0 { None } else { Some(args.max_blocks) },
@@ -63,40 +103,55 @@ fn main() -> Result<(), std::io::Error> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
 
-    let filename = "non-standard-txs.csv";
+    let unspent: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
+    let spent: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
 
-    // Delete file if it exists
-    std::fs::remove_file(filename).unwrap_or_default();
+    let unspent = std::cell::RefCell::new(unspent);
+    let spent = std::cell::RefCell::new(spent);
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(filename)
-        .unwrap();
-
-    // Headers
-    file.write_all(format!("sep=;\n\"Block Time\"; Block; Tx; Value; Script\n").as_bytes())
-        .unwrap();
-
-    let non_standard: BTreeMap<(Txid, u32), UnknownScriptData> = BTreeMap::new();
-    let non_standard = std::cell::RefCell::new(non_standard);
+    let last_block_height: RefCell<u32> = RefCell::new(0);
+    let last_block_header: RefCell<Option<Header>> = RefCell::new(None);
 
     let mut reader = BlockReader::new(
         options,
         Box::new(|block, height| {
+            last_block_header.replace(Some(block.header));
+
             let block = block.decode().unwrap();
 
+            last_block_height.replace(height);
+
+            let mut unspent = unspent.borrow_mut();
+
             for tx in block.txdata.iter() {
+                for input in tx.input.iter() {
+                    let key = (input.previous_output.txid, input.previous_output.vout);
+
+                    // Skip coinbase
+                    if input.previous_output.is_null() {
+                        continue;
+                    }
+
+                    // Remove spent unknown script
+                    match unspent.remove(&key) {
+                        Some(value) => {
+                            spent.borrow_mut().insert(key, value);
+                        }
+                        None => {}
+                    }
+                }
+
                 for (vout, output) in tx.output.iter().enumerate() {
                     let script_type = blk_reader::ScriptType::from(&output.script_pubkey);
 
                     if script_type == ScriptType::Unknown {
                         let key = (tx.compute_txid(), vout as u32);
-                        non_standard.borrow_mut().insert(
+
+                        unspent.insert(
                             key,
                             UnknownScriptData {
                                 time: block.header.time,
-                                height: height - 1,
+                                height,
                                 output: output.clone(),
                             },
                         );
@@ -108,29 +163,32 @@ fn main() -> Result<(), std::io::Error> {
 
     reader.read(&args.path)?;
 
-    let non_standard = non_standard.borrow();
+    let last_block_height = last_block_height.take();
+    let last_block_id = last_block_header.take().unwrap();
+    println!("Done reading blocks. Last block is {} {}", last_block_height, last_block_id.block_hash());
     
-    println!("Done reading blocks, writing {} outputs to {}", non_standard.len(), filename);
+    let spent = spent.borrow();
+    let unspent = unspent.borrow();
 
-    for ((txid, vout), data) in non_standard.iter() {
-        if args.ignore_empty && data.output.value == Amount::ZERO {
-            continue;
-        }
+    let unspent_filename = "non-standard-unspent.csv";
+    let mut unspent_file = prepare_file(unspent_filename);
+    println!("Writing {} items into {}", unspent.len(), unspent_filename);
+    write_data(&mut unspent_file, &unspent, false);
 
-        file.write_all(
-            format!(
-                "{}; {}; {}:{}; {}; {}\n",
-                blk_reader::DateTime::from_timestamp(data.time as i64, 0).unwrap().to_string().replace(" UTC", ""),
-                data.height,
-                txid,
-                vout,
-                data.output.value.to_btc(),
-                data.output.script_pubkey.to_string()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    }
+    let unspent_filename = "non-standard-unspent-non-zero.csv";
+    let mut unspent_file = prepare_file(unspent_filename);
+    println!("Writing {} items into {}", unspent.len(), unspent_filename);
+    write_data(&mut unspent_file, &unspent, true);
+    
+    let spent_filename = "non-standard-spent.csv";
+    let mut spent_file = prepare_file(spent_filename);
+    println!("Writing {} items into {}", spent.len(), spent_filename);
+    write_data(&mut spent_file, &spent, false);
+
+    let spent_filename = "non-standard-spent-non-zero.csv";
+    let mut spent_file = prepare_file(spent_filename);
+    println!("Writing {} items into {}", spent.len(), spent_filename);
+    write_data(&mut spent_file, &spent, true);
 
     Ok(())
 }

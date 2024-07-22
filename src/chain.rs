@@ -129,6 +129,13 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         }
     }
 
+    pub fn next_id(&self) -> I {
+        match &self.head {
+            Some(head) => head.borrow().block.as_ref().unwrap().get_block_id(),
+            None => self.genesis_identifier,
+        }
+    }
+
     fn longest_chain(&self) -> Option<Rc<RefCell<Node<D>>>> {
         match &self.head {
             Some(head) => Some(Node::longest_right(Rc::clone(head))),

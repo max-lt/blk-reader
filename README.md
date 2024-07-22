@@ -34,8 +34,10 @@ Usage: `list-blocks <blk-dir> [--max-blocks <max-blocks>] [--max-files <max-bloc
 list-blocks /path/to/blk/dir --max-blocks 10
 ```
 
-### list-non-standard-txs
+### list-non-standard
 
 ```bash
-list-non-standard-txs /path/to/blk/dir --max-blocks 100000
+list-non-standard /path/to/blk/dir --max-blocks 100000
 ```
+
+Note: **Block are indexed from 0**, so if you want to read up to block 100000 inclusive, you need to pass `--max-blocks 100001`.
