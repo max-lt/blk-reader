@@ -116,14 +116,15 @@ fn main() -> Result<(), std::io::Error> {
         options,
         Box::new(|block, height| {
             last_block_header.replace(Some(block.header));
+            last_block_height.replace(height);
 
             let block = block.decode().unwrap();
-
-            last_block_height.replace(height);
 
             let mut unspent = unspent.borrow_mut();
 
             for tx in block.txdata.iter() {
+                let mut txid: Option<Txid> = None; // Compute txid only if needed
+
                 for input in tx.input.iter() {
                     let key = (input.previous_output.txid, input.previous_output.vout);
 
@@ -132,7 +133,7 @@ fn main() -> Result<(), std::io::Error> {
                         continue;
                     }
 
-                    // Remove spent unknown script
+                    // Remove from unspent and add to spent
                     match unspent.remove(&key) {
                         Some(value) => {
                             spent.borrow_mut().insert(key, value);
@@ -140,12 +141,21 @@ fn main() -> Result<(), std::io::Error> {
                         None => {}
                     }
                 }
-
+                
                 for (vout, output) in tx.output.iter().enumerate() {
                     let script_type = blk_reader::ScriptType::from(&output.script_pubkey);
 
                     if script_type == ScriptType::Unknown {
-                        let key = (tx.compute_txid(), vout as u32);
+                        let txid = match txid {
+                            Some(txid) => txid,
+                            None => {
+                                let computed = tx.compute_txid();
+                                txid = Some(computed.clone());
+                                computed
+                            },
+                        };
+
+                        let key = (txid, vout as u32);
 
                         unspent.insert(
                             key,

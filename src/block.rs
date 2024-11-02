@@ -28,6 +28,9 @@ use crate::time_str;
 
 #[derive(Debug, Clone)]
 pub struct LazyBlock {
+    pub blk_index: u32,
+    pub blk_path: String,
+    pub offset: u64,
     pub header: Header,
     data: Vec<u8>,
 }
@@ -127,6 +130,11 @@ impl<'a> BlockReader<'a> {
         let file = File::open(file_path)?;
         let file_size = file.metadata().unwrap().len();
 
+        let file_path_len = file_path.len();
+        let blk_index = file_path[file_path_len - 9..file_path_len - 4]
+            .parse::<u32>()
+            .unwrap();
+
         let mut offset = 0; // Buffer offset
 
         let mut reader = BufReader::new(file);
@@ -139,8 +147,6 @@ impl<'a> BlockReader<'a> {
                 println!("Magic is not correct");
                 return Err(Error::new(ErrorKind::Other, "Magic is not correct"));
             }
-
-            offset += 4 + 4 + size as u64;
             
             // Read the block header
             let header = Header::consensus_decode(&mut reader).unwrap();
@@ -151,7 +157,9 @@ impl<'a> BlockReader<'a> {
             reader.read_exact(&mut data).unwrap();
 
             // Insert the block into the index
-            self.insert(LazyBlock { header, data });
+            self.insert(LazyBlock { header, data, offset, blk_path: file_path.to_string(), blk_index });
+
+            offset += 4 + 4 + size as u64;
 
             // Stop signal received
             if self

@@ -96,7 +96,7 @@ impl<D> Node<D> {
         }
     }
 
-    /// Extract the tail of longest chain from the current node to the right
+    /// Extract the tail of longest chain from the current node
     fn longest_right(node: Rc<RefCell<Node<D>>>) -> Rc<RefCell<Node<D>>> {
         match &node.borrow().next {
             Some(next) => match next {
@@ -214,7 +214,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         };
     }
 
-    /// Pop head: remove the head of the longest chain and return it
+    /// Pop head: remove the head of the chain and return it
     /// If the chain is empty, return None
     /// If the chain has only one block, return the block and set the head to None
     /// If the head has a single next node, set the head to the next node
@@ -242,9 +242,10 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
             }
         };
 
-        // Update the new head
+        // Update the prev node for the next head
         next.borrow_mut().prev = None;
-
+        
+        // Update the new head
         match head_node.next.as_ref() {
             None => {
                 self.head = None;
