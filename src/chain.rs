@@ -244,7 +244,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
 
         // Update the prev node for the next head
         next.borrow_mut().prev = None;
-        
+
         // Update the new head
         match head_node.next.as_ref() {
             None => {

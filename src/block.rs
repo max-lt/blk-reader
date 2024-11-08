@@ -141,13 +141,13 @@ impl<'a> BlockReader<'a> {
 
         loop {
             let magic = Magic::consensus_decode(&mut reader).unwrap();
-            let size = u32::consensus_decode(&mut reader).unwrap() as usize;
-
             if magic != MAGIC {
-                println!("Magic is not correct");
+                println!("Magic is not correct in {} offset={}; got {}", file_path, offset, magic);
                 return Err(Error::new(ErrorKind::Other, "Magic is not correct"));
             }
-            
+
+            let size = u32::consensus_decode(&mut reader).unwrap() as usize;
+
             // Read the block header
             let header = Header::consensus_decode(&mut reader).unwrap();
             let time = header.time as i64;
