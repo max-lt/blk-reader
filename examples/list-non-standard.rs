@@ -5,14 +5,94 @@ use std::io::Write;
 use std::sync::Arc;
 
 use bitcoin::block::Header;
+use bitcoin::ScriptBuf;
 use bitcoin::Amount;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use blk_reader::BlockReader;
 use blk_reader::BlockReaderOptions;
-use blk_reader::ScriptType;
 
 use clap::Parser;
+
+#[derive(PartialEq)]
+pub enum ScriptType {
+  P2PK,
+  P2PKH,
+  P2SH,
+  P2WPKH,
+  P2WSH,
+  P2TR,
+  Empty,
+  OpReturn,
+  Multisig,
+  WitnessProgram,
+  Unknown,
+}
+
+impl From<&ScriptBuf> for ScriptType {
+  fn from(script: &ScriptBuf) -> Self {
+      if script.is_p2pk() {
+          return ScriptType::P2PK;
+      }
+
+      if script.is_p2pkh() {
+          return ScriptType::P2PKH;
+      }
+
+      if script.is_p2sh() {
+          return ScriptType::P2SH;
+      }
+
+      if script.is_p2wpkh() {
+          return ScriptType::P2WPKH;
+      }
+
+      if script.is_p2wsh() {
+          return ScriptType::P2WSH;
+      }
+
+      if script.is_p2tr() {
+          return ScriptType::P2TR;
+      }
+
+      if script.is_empty() {
+          return ScriptType::Empty;
+      }
+
+      if script.is_op_return() {
+          return ScriptType::OpReturn;
+      }
+
+      if script.is_multisig() {
+          return ScriptType::Multisig;
+      }
+
+      if script.is_witness_program() {
+          return ScriptType::WitnessProgram;
+      }
+
+      ScriptType::Unknown
+  }
+}
+
+// https://github.com/bitcoin/bitcoin/blob/master/src/addresstype.cpp#L49
+impl ToString for ScriptType {
+  fn to_string(&self) -> String {
+      match self {
+          ScriptType::P2PK => "P2PK".to_string(),
+          ScriptType::P2PKH => "P2PKH".to_string(),
+          ScriptType::P2SH => "P2SH".to_string(),
+          ScriptType::P2WPKH => "P2WPKH".to_string(),
+          ScriptType::P2WSH => "P2WSH".to_string(),
+          ScriptType::P2TR => "P2TR".to_string(),
+          ScriptType::Empty => "Empty".to_string(),
+          ScriptType::OpReturn => "OpReturn".to_string(),
+          ScriptType::Multisig => "MultiSig".to_string(),
+          ScriptType::WitnessProgram => "WitnessProgram".to_string(),
+          ScriptType::Unknown => "UNKNOWN".to_string(),
+      }
+  }
+}
 
 /// Simple program to iterate over all blocks in the blockchain
 #[derive(Parser, Debug)]
@@ -141,9 +221,9 @@ fn main() -> Result<(), std::io::Error> {
                         None => {}
                     }
                 }
-                
+
                 for (vout, output) in tx.output.iter().enumerate() {
-                    let script_type = blk_reader::ScriptType::from(&output.script_pubkey);
+                    let script_type = ScriptType::from(&output.script_pubkey);
 
                     if script_type == ScriptType::Unknown {
                         let txid = match txid {
@@ -176,7 +256,7 @@ fn main() -> Result<(), std::io::Error> {
     let last_block_height = last_block_height.take();
     let last_block_id = last_block_header.take().unwrap();
     println!("Done reading blocks. Last block is {} {}", last_block_height, last_block_id.block_hash());
-    
+
     let spent = spent.borrow();
     let unspent = unspent.borrow();
 
@@ -189,7 +269,7 @@ fn main() -> Result<(), std::io::Error> {
     let mut unspent_file = prepare_file(unspent_filename);
     println!("Writing {} items into {}", unspent.len(), unspent_filename);
     write_data(&mut unspent_file, &unspent, true);
-    
+
     let spent_filename = "non-standard-spent.csv";
     let mut spent_file = prepare_file(spent_filename);
     println!("Writing {} items into {}", spent.len(), spent_filename);
