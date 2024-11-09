@@ -52,14 +52,15 @@ fn main() -> Result<(), std::io::Error> {
     let last_block_height = RefCell::new(0);
     let last_block: RefCell<Option<LazyBlock>> = RefCell::new(None);
 
-    let mut reader = BlockReader::new(
-        options,
+    let mut reader = BlockReader::new(options);
+
+    reader.set_block_cb(
         Box::new(|block, height| {
             // Do nothing to evaluate time to read (and order) blocks
             // without any processing
             last_block_height.replace(height);
             last_block.replace(Some(block));
-        }),
+        })
     );
 
     reader.read(&args.path)?;

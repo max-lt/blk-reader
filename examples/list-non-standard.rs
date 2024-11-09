@@ -14,6 +14,8 @@ use blk_reader::BlockReaderOptions;
 
 use clap::Parser;
 
+type DateTime = chrono::DateTime<chrono::Utc>;
+
 #[derive(PartialEq)]
 pub enum ScriptType {
   P2PK,
@@ -151,7 +153,7 @@ fn write_data(
         file.write_all(
             format!(
                 "{}; {}; {}:{}; {}; {}\n",
-                blk_reader::DateTime::from_timestamp(data.time as i64, 0)
+                DateTime::from_timestamp(data.time as i64, 0)
                     .unwrap()
                     .to_string()
                     .replace(" UTC", ""),
@@ -192,8 +194,9 @@ fn main() -> Result<(), std::io::Error> {
     let last_block_height: RefCell<u32> = RefCell::new(0);
     let last_block_header: RefCell<Option<Header>> = RefCell::new(None);
 
-    let mut reader = BlockReader::new(
-        options,
+    let mut reader = BlockReader::new(options);
+
+    reader.set_block_cb(
         Box::new(|block, height| {
             last_block_header.replace(Some(block.header));
             last_block_height.replace(height);
@@ -248,7 +251,7 @@ fn main() -> Result<(), std::io::Error> {
                     }
                 }
             }
-        }),
+        })
     );
 
     reader.read(&args.path)?;

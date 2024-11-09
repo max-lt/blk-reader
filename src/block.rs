@@ -15,16 +15,12 @@ use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
 use bitcoin::Block;
 use bitcoin::BlockHash;
+use bitcoin::Transaction;
 
 static MAGIC: Magic = Magic::BITCOIN;
 
-use bitcoin::Transaction;
-use chrono::DateTime;
-use chrono::Utc;
-
 use crate::chain::Chain;
 use crate::chain::GetBlockIds;
-use crate::time_str;
 
 #[derive(Debug, Clone)]
 pub struct LazyBlock {
@@ -39,7 +35,10 @@ impl LazyBlock {
     pub fn decode(&self) -> Result<Block, bitcoin::consensus::encode::Error> {
         let mut txdata: &[u8] = &self.data[..];
         let txdata = Vec::<Transaction>::consensus_decode(&mut txdata)?;
-        Ok(Block { header: self.header, txdata })
+        Ok(Block {
+            header: self.header,
+            txdata,
+        })
     }
 }
 
@@ -53,23 +52,11 @@ impl GetBlockIds<BlockHash> for LazyBlock {
     }
 }
 
-fn block_time(time: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(time, 0).unwrap()
-}
-
-fn system_time() -> chrono::DateTime<Utc> {
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    DateTime::from_timestamp(time as i64, 0).unwrap()
-}
-
 pub struct BlockReader<'call> {
     height: u32,
     chain: Chain<BlockHash, LazyBlock>,
-    block_cb: Box<dyn Fn(LazyBlock, u32) + 'call>,
+    block_cb: Option<Box<dyn Fn(LazyBlock, u32) + 'call>>,
+    file_cb: Option<Box<dyn Fn(String, u32, u32) + 'call>>,
     options: BlockReaderOptions,
 }
 
@@ -92,16 +79,22 @@ impl Default for BlockReaderOptions {
 }
 
 impl<'a> BlockReader<'a> {
-    pub fn new(
-        options: BlockReaderOptions,
-        block_cb: Box<dyn Fn(LazyBlock, u32) + 'a>,
-    ) -> BlockReader<'a> {
+    pub fn new(options: BlockReaderOptions) -> BlockReader<'a> {
         BlockReader {
             height: 0,
             chain: Chain::new(BlockHash::all_zeros()),
-            block_cb,
+            block_cb: None,
+            file_cb: None,
             options,
         }
+    }
+
+    pub fn set_block_cb(&mut self, block_cb: Box<dyn Fn(LazyBlock, u32) + 'a>) {
+        self.block_cb = Some(block_cb);
+    }
+
+    pub fn set_file_cb(&mut self, file_cb: Box<dyn Fn(String, u32, u32) + 'a>) {
+        self.file_cb = Some(file_cb);
     }
 
     /// Read the directory and return a list of files
@@ -142,7 +135,10 @@ impl<'a> BlockReader<'a> {
         loop {
             let magic = Magic::consensus_decode(&mut reader).unwrap();
             if magic != MAGIC {
-                println!("Magic is not correct in {} offset={}; got {}", file_path, offset, magic);
+                println!(
+                    "Magic is not correct in {} offset={}; got {}",
+                    file_path, offset, magic
+                );
                 return Err(Error::new(ErrorKind::Other, "Magic is not correct"));
             }
 
@@ -150,14 +146,22 @@ impl<'a> BlockReader<'a> {
 
             // Read the block header
             let header = Header::consensus_decode(&mut reader).unwrap();
-            let time = header.time as i64;
+
+            let time = header.time;
+            let height: u32 = self.height;
 
             // Skip the rest of the block
             let mut data = vec![0; size - 80];
             reader.read_exact(&mut data).unwrap();
 
             // Insert the block into the index
-            self.insert(LazyBlock { header, data, offset, blk_path: file_path.to_string(), blk_index });
+            self.insert(LazyBlock {
+                header,
+                data,
+                offset,
+                blk_path: file_path.to_string(),
+                blk_index,
+            });
 
             offset += 4 + 4 + size as u64;
 
@@ -173,7 +177,11 @@ impl<'a> BlockReader<'a> {
 
             // We reached the limit of blocks, stop here
             if self.max_height_reached() {
-                println!("Reached limit of blocks. Next block is {} {}", self.height, self.chain.next_id());
+                println!(
+                    "Reached limit of blocks. Next block is {} {}",
+                    height,
+                    self.chain.next_id()
+                );
                 return Ok(false);
             }
 
@@ -185,14 +193,10 @@ impl<'a> BlockReader<'a> {
 
             // End of file, there are more blocks to read in the next file
             if offset >= file_size {
-                println!(
-                    "{} done {} {} {} orphans={}",
-                    time_str(system_time()),
-                    file_path,
-                    self.height,
-                    time_str(block_time(time)),
-                    self.orphans()
-                );
+                if let Some(ref file_cb) = self.file_cb {
+                    file_cb(file_path.to_string(), height, time);
+                }
+
                 return Ok(true);
             }
         }
@@ -221,7 +225,9 @@ impl<'a> BlockReader<'a> {
         self.height += 1;
 
         // Call the callback function
-        (self.block_cb)(block, height);
+        if let Some(ref block_cb) = self.block_cb {
+            block_cb(block, height);
+        }
     }
 
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {

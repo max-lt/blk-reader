@@ -2,9 +2,18 @@ use std::sync::Arc;
 
 use blk_reader::BlockReader;
 use blk_reader::BlockReaderOptions;
-use blk_reader::DateTime;
 
 use clap::Parser;
+
+type DateTime = chrono::DateTime<chrono::Utc>;
+
+fn time_str(time: DateTime) -> String {
+    time.to_string().replace(" UTC", "")
+}
+
+fn block_time(time: u32) -> DateTime {
+    DateTime::from_timestamp(time as i64, 0).unwrap()
+}
 
 /// Simple program to iterate over all blocks in the blockchain
 #[derive(Parser, Debug)]
@@ -39,35 +48,55 @@ fn main() -> Result<(), std::io::Error> {
     );
 
     let options = BlockReaderOptions {
-        max_blocks: if args.max_blocks == 0 { None } else { Some(args.max_blocks) },
-        max_blk_files: if args.max_blk_files == 0 { None } else { Some(args.max_blk_files) },
-        max_orphans: if args.max_orphans == 0 { None } else { Some(args.max_orphans) },
+        max_blocks: if args.max_blocks == 0 {
+            None
+        } else {
+            Some(args.max_blocks)
+        },
+        max_blk_files: if args.max_blk_files == 0 {
+            None
+        } else {
+            Some(args.max_blk_files)
+        },
+        max_orphans: if args.max_orphans == 0 {
+            None
+        } else {
+            Some(args.max_orphans)
+        },
         ..Default::default()
     };
 
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&options.stop_flag))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&options.stop_flag))?;
 
-    let mut reader = BlockReader::new(
-        options,
-        Box::new(|block, height| {
-            let offset = &block.offset;
-            let blk_path = &block.blk_path;
-            let blk_index = &block.blk_index;
-            let block = block.decode().unwrap();
+    let mut reader = BlockReader::new(options);
 
-            println!(
-                "Block: {} {} {} in {} {} (offset={}) {} transaction(s)",
-                block.block_hash(),
-                height,
-                DateTime::from_timestamp(block.header.time as i64, 0).unwrap(),
-                blk_path,
-                blk_index,
-                offset,
-                block.txdata.len()
-            );
-        }),
-    );
+    reader.set_block_cb(Box::new(|block, height| {
+        let offset = &block.offset;
+        let blk_path = &block.blk_path;
+        let blk_index = &block.blk_index;
+        let block = block.decode().unwrap();
+
+        println!(
+            "Block: {} {} {} in {} {} (offset={}) {} transaction(s)",
+            block.block_hash(),
+            height,
+            DateTime::from_timestamp(block.header.time as i64, 0).unwrap(),
+            blk_path,
+            blk_index,
+            offset,
+            block.txdata.len()
+        );
+    }));
+
+    reader.set_file_cb(Box::new(|file, height, time| {
+        println!(
+            "done reading {} {} {}",
+            file.get(file.len() - 12..).unwrap_or(file.as_str()),
+            height,
+            time_str(block_time(time))
+        );
+    }));
 
     reader.read(&args.path)?;
 
