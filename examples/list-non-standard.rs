@@ -201,13 +201,9 @@ fn main() -> Result<(), std::io::Error> {
             last_block_header.replace(Some(block.header));
             last_block_height.replace(height);
 
-            let block = block.decode().unwrap();
-
             let mut unspent = unspent.borrow_mut();
 
-            for tx in block.txdata.iter() {
-                let mut txid: Option<Txid> = None; // Compute txid only if needed
-
+            for (tx, txid) in block.txdata.iter().zip(block.txids.iter()) {
                 for input in tx.input.iter() {
                     let key = (input.previous_output.txid, input.previous_output.vout);
 
@@ -229,16 +225,7 @@ fn main() -> Result<(), std::io::Error> {
                     let script_type = ScriptType::from(&output.script_pubkey);
 
                     if script_type == ScriptType::Unknown {
-                        let txid = match txid {
-                            Some(txid) => txid,
-                            None => {
-                                let computed = tx.compute_txid();
-                                txid = Some(computed.clone());
-                                computed
-                            },
-                        };
-
-                        let key = (txid, vout as u32);
+                        let key = (*txid, vout as u32);
 
                         unspent.insert(
                             key,

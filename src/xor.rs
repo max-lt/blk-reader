@@ -21,6 +21,27 @@ pub fn read_xor_key(blocks_dir: &std::path::Path) -> Result<XorKey, Error> {
     }
 }
 
+/// XOR a whole buffer in place, one 64-bit word at a time.
+/// The buffer must start at position 0 of the file, so that the key
+/// alignment is preserved. A zero key leaves the buffer unchanged.
+pub fn xor_in_place(buf: &mut [u8], key: XorKey) {
+    if key == [0; XOR_KEY_LEN] {
+        return;
+    }
+
+    let key64 = u64::from_ne_bytes(key);
+    let mut chunks = buf.chunks_exact_mut(XOR_KEY_LEN);
+    for chunk in &mut chunks {
+        let word = u64::from_ne_bytes((&*chunk).try_into().unwrap()) ^ key64;
+        chunk.copy_from_slice(&word.to_ne_bytes());
+    }
+
+    // The remainder starts at a multiple of the key length
+    for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
+        *byte ^= key[i % XOR_KEY_LEN];
+    }
+}
+
 /// Reader that de-obfuscates data XORed with an 8-byte key,
 /// keyed on the absolute position in the underlying file.
 /// An all-zero key leaves the data unchanged.
@@ -89,6 +110,27 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, plain[13..]);
+    }
+
+    #[test]
+    fn xor_in_place_matches_bytewise_xor() {
+        let key: XorKey = [0xde, 0xca, 0x6d, 0x01, 0x00, 0x56, 0x05, 0xe5];
+
+        // Lengths around the 8-byte boundary to exercise the remainder
+        for len in [0usize, 1, 7, 8, 9, 16, 23, 1000, 1001] {
+            let plain: Vec<u8> = (0..len).map(|i| i as u8).collect();
+
+            let mut fast = plain.clone();
+            xor_in_place(&mut fast, key);
+
+            let bytewise: Vec<u8> = plain
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ key[i % XOR_KEY_LEN])
+                .collect();
+
+            assert_eq!(fast, bytewise, "len={}", len);
+        }
     }
 
     #[test]

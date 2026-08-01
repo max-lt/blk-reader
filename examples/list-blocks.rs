@@ -72,19 +72,14 @@ fn main() -> Result<(), std::io::Error> {
     let mut reader = BlockReader::new(options);
 
     reader.set_block_cb(Box::new(|block, height| {
-        let offset = &block.offset;
-        let blk_path = &block.blk_path;
-        let blk_index = &block.blk_index;
-        let block = block.decode().unwrap();
-
         println!(
             "Block: {} {} {} in {} {} (offset={}) {} transaction(s)",
-            block.block_hash(),
+            block.block_hash,
             height,
             DateTime::from_timestamp(block.header.time as i64, 0).unwrap(),
-            blk_path,
-            blk_index,
-            offset,
+            block.blk_path,
+            block.blk_index,
+            block.offset,
             block.txdata.len()
         );
     }));
