@@ -27,7 +27,7 @@ use crate::xor::XOR_KEY_LEN;
 #[derive(Debug, Clone)]
 pub struct LazyBlock {
     pub blk_index: u32,
-    pub blk_path: String,
+    pub blk_path: Arc<str>,
     pub offset: u64,
     pub header: Header,
     data: Vec<u8>,
@@ -75,7 +75,7 @@ pub struct BlockReaderOptions {
 impl Default for BlockReaderOptions {
     fn default() -> Self {
         BlockReaderOptions {
-            max_blocks: Some(1_000),
+            max_blocks: None,
             max_orphans: Some(10_000),
             max_blk_files: None,
             magic: Magic::BITCOIN,
@@ -110,7 +110,7 @@ impl<'a> BlockReader<'a> {
             .filter_map(Result::ok)
             .map(|d| d.path())
             .filter(|d| d.is_file() && d.extension().is_some())
-            .map(|d| d.to_str().unwrap().to_string())
+            .filter_map(|d| d.to_str().map(str::to_string))
             .filter(|s| s.contains("/blk") && s.ends_with(".dat"))
             .collect();
 
@@ -126,14 +126,23 @@ impl<'a> BlockReader<'a> {
 
     /// Read blocks from a file and insert them into the index
     /// Return true if there are more blocks to read, false if we reached the end of the file
-    fn read_blocs(&mut self, file_path: &str) -> Result<bool, Error> {
+    fn read_blocks(&mut self, file_path: &str) -> Result<bool, Error> {
         let file = File::open(file_path)?;
         let file_size = file.metadata()?.len();
 
-        let file_path_len = file_path.len();
-        let blk_index = file_path[file_path_len - 9..file_path_len - 4]
-            .parse::<u32>()
-            .unwrap();
+        let blk_index = std::path::Path::new(file_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("blk"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid blk file name: {}", file_path),
+                )
+            })?;
+
+        let blk_path: Arc<str> = Arc::from(file_path);
 
         let mut offset = 0; // Buffer offset
 
@@ -197,7 +206,7 @@ impl<'a> BlockReader<'a> {
                 header,
                 data,
                 offset,
-                blk_path: file_path.to_string(),
+                blk_path: Arc::clone(&blk_path),
                 blk_index,
             });
 
@@ -278,7 +287,7 @@ impl<'a> BlockReader<'a> {
                 break;
             }
 
-            if !self.read_blocs(&entry)? {
+            if !self.read_blocks(&entry)? {
                 break;
             }
         }

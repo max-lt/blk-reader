@@ -124,7 +124,7 @@ impl<D> Node<D> {
     }
 }
 
-impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D> {
+impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
     pub fn new(genesis_identifier: I) -> Chain<I, D> {
         Chain {
             head: None,
@@ -134,6 +134,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         }
     }
 
+    /// Identifier of the current head, i.e. the next block to be popped
     pub fn next_id(&self) -> I {
         match &self.head {
             Some(head) => head.borrow().block.as_ref().unwrap().get_block_id(),
@@ -171,6 +172,27 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
     }
 
     pub fn insert(&mut self, block: D) {
+        let mut pending = match self.attach(block) {
+            Some(block_hash) => vec![block_hash],
+            None => return,
+        };
+
+        // Attach pending orphan descendants iteratively (a recursive
+        // resolution could overflow the stack on long orphan chains)
+        while let Some(parent_hash) = pending.pop() {
+            if let Some(orphans) = self.orphans.remove(&parent_hash) {
+                for orphan in orphans {
+                    if let Some(block_hash) = self.attach(orphan) {
+                        pending.push(block_hash);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Attach a block to the chain, or store it as an orphan.
+    /// Returns the block id if it was attached.
+    fn attach(&mut self, block: D) -> Option<I> {
         let block_hash = block.get_block_id();
         let prev_hash = block.get_block_prev_id();
 
@@ -185,39 +207,31 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
             self.nodes.insert(block_hash, node.clone());
             self.head = Some(node);
 
-            return;
+            return Some(block_hash);
         }
 
-        match self.nodes.get_mut(&prev_hash) {
-            // If the new block is an orphan, add it to the orphans list and return
+        let parent_node = match self.nodes.get(&prev_hash) {
+            // If the new block is an orphan, add it to the orphans list
             None => {
                 self.orphans.entry(prev_hash).or_default().push(block);
-                return;
+                return None;
             }
-            // If the new block is a child of a parent node, add it to the parent's next list
-            Some(parent_node) => {
-                let node = Rc::new(RefCell::new(Node {
-                    block: Some(block),
-                    prev: Some(Rc::downgrade(parent_node)),
-                    next: None,
-                }));
-
-                // Add the new node to the parent's next list
-                parent_node.borrow_mut().add_next(node.clone());
-
-                // Add the new node to the nodes map
-                self.nodes.insert(block_hash, node.clone());
-
-                node
-            }
+            Some(parent_node) => Rc::clone(parent_node),
         };
 
-        // We inserted a new block, check if we can insert any orphans
-        if let Some(orphans) = self.orphans.remove(&block_hash) {
-            for orphan in orphans {
-                self.insert(orphan);
-            }
-        }
+        let node = Rc::new(RefCell::new(Node {
+            block: Some(block),
+            prev: Some(Rc::downgrade(&parent_node)),
+            next: None,
+        }));
+
+        // Add the new node to the parent's next list
+        parent_node.borrow_mut().add_next(node.clone());
+
+        // Add the new node to the nodes map
+        self.nodes.insert(block_hash, node);
+
+        Some(block_hash)
     }
 
     /// Pop head: remove the head of the chain and return it
@@ -264,20 +278,14 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
                 }
                 NextNode::Multiple(nodes) => {
                     for node in nodes.iter() {
-                        // Continue if node is next
+                        // Keep the branch we are following
                         if Rc::ptr_eq(&next, node) {
-                            println!(
-                                "Continue, ignoring {}",
-                                node.borrow().block.as_ref().unwrap().get_block_id()
-                            );
                             continue;
                         }
 
-                        let nodes = Node::extract_right(Rc::clone(node));
-                        println!("Removing nodes: {}", nodes.len());
-                        for node in nodes.iter() {
+                        // Discard the losing fork
+                        for node in Node::extract_right(Rc::clone(node)).iter() {
                             let node_id = node.borrow().block.as_ref().unwrap().get_block_id();
-                            println!("Removing node {}", node_id);
                             self.nodes.remove(&node_id);
                         }
                     }
@@ -290,11 +298,9 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
     }
 }
 
-impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> std::fmt::Display for Chain<I, D> {
+impl<I: Ord + Copy + Display, D: GetBlockIds<I>> std::fmt::Display for Chain<I, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let tails = self.tails();
-
-        println!("nTails: {}", tails.len());
 
         for tail in tails {
             let nodes = Node::extract_left(tail.clone());
