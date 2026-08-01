@@ -17,8 +17,6 @@ use bitcoin::Block;
 use bitcoin::BlockHash;
 use bitcoin::Transaction;
 
-static MAGIC: Magic = Magic::BITCOIN;
-
 use crate::chain::Chain;
 use crate::chain::GetBlockIds;
 use crate::xor::read_xor_key;
@@ -69,6 +67,8 @@ pub struct BlockReaderOptions {
     pub max_blocks: Option<u32>,
     pub max_orphans: Option<usize>,
     pub max_blk_files: Option<usize>,
+    /// Network magic bytes (defaults to mainnet)
+    pub magic: Magic,
     pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -78,6 +78,7 @@ impl Default for BlockReaderOptions {
             max_blocks: Some(1_000),
             max_orphans: Some(10_000),
             max_blk_files: None,
+            magic: Magic::BITCOIN,
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -143,7 +144,7 @@ impl<'a> BlockReader<'a> {
         loop {
             let magic = Magic::consensus_decode(&mut reader)
                 .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
-            if magic != MAGIC {
+            if magic != self.options.magic {
                 // Bitcoin Core preallocates blk files: raw zero bytes (read
                 // here XORed with the key) mark the end of the written data
                 let zeros: [u8; 4] =
