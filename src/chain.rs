@@ -25,7 +25,9 @@ pub struct Node<Data> {
 pub struct Chain<I, D> {
     head: Option<Rc<RefCell<Node<D>>>>,
     nodes: BTreeMap<I, Rc<RefCell<Node<D>>>>,
-    orphans: BTreeMap<I, D>,
+    /// Blocks whose parent is not known yet, keyed by parent id.
+    /// Competing blocks can share the same parent, hence the Vec.
+    orphans: BTreeMap<I, Vec<D>>,
     genesis_identifier: I,
 }
 
@@ -162,7 +164,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
     }
 
     pub fn orphans(&self) -> usize {
-        self.orphans.len()
+        self.orphans.values().map(Vec::len).sum()
     }
 
     pub fn insert(&mut self, block: D) {
@@ -186,7 +188,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         match self.nodes.get_mut(&prev_hash) {
             // If the new block is an orphan, add it to the orphans list and return
             None => {
-                self.orphans.insert(prev_hash, block);
+                self.orphans.entry(prev_hash).or_default().push(block);
                 return;
             }
             // If the new block is a child of a parent node, add it to the parent's next list
@@ -208,10 +210,11 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
         };
 
         // We inserted a new block, check if we can insert any orphans
-        match self.orphans.remove(&block_hash) {
-            Some(orphan) => self.insert(orphan),
-            None => {}
-        };
+        if let Some(orphans) = self.orphans.remove(&block_hash) {
+            for orphan in orphans {
+                self.insert(orphan);
+            }
+        }
     }
 
     /// Pop head: remove the head of the chain and return it
@@ -315,13 +318,15 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> std::fmt::D
         }
 
         write!(f, "Orphans: ")?;
-        for (_, data) in self.orphans.iter() {
-            write!(
-                f,
-                "{} (prev: {}),",
-                data.get_block_id(),
-                data.get_block_prev_id()
-            )?;
+        for (_, blocks) in self.orphans.iter() {
+            for data in blocks.iter() {
+                write!(
+                    f,
+                    "{} (prev: {}),",
+                    data.get_block_id(),
+                    data.get_block_prev_id()
+                )?;
+            }
         }
         write!(f, "\n")?;
 
@@ -428,5 +433,35 @@ mod tests {
         assert_eq!(chain.orphans.len(), 0);
         assert_eq!(chain.longest_chain_depth(), 5);
         println!("Chains: \n{}", chain);
+    }
+
+    #[test]
+    fn test_competing_orphans() {
+        let mut chain = Chain::new("genesis-identifier");
+
+        chain.insert(Block::new("1", "genesis-identifier"));
+
+        // Two competing blocks share the same missing parent "2"
+        chain.insert(Block::new("3a", "2"));
+        chain.insert(Block::new("3b", "2"));
+        assert_eq!(chain.orphans(), 2);
+
+        // Child of one of the competing orphans
+        chain.insert(Block::new("4", "3a"));
+        assert_eq!(chain.orphans(), 3);
+
+        // Parent arrives: all pending children must be attached
+        chain.insert(Block::new("2", "1"));
+        assert_eq!(chain.orphans(), 0);
+
+        // 1 -> 2 -> 3a -> 4 (3b is a shorter fork)
+        assert_eq!(chain.longest_chain_depth(), 4);
+
+        assert_eq!(chain.pop_head().unwrap().block_id, "1");
+        assert_eq!(chain.pop_head().unwrap().block_id, "2");
+        // Popping "2" discards the losing fork "3b"
+        assert_eq!(chain.pop_head().unwrap().block_id, "3a");
+        assert_eq!(chain.pop_head().unwrap().block_id, "4");
+        assert!(chain.pop_head().is_none());
     }
 }

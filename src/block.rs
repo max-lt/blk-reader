@@ -127,7 +127,7 @@ impl<'a> BlockReader<'a> {
     /// Return true if there are more blocks to read, false if we reached the end of the file
     fn read_blocs(&mut self, file_path: &str) -> Result<bool, Error> {
         let file = File::open(file_path)?;
-        let file_size = file.metadata().unwrap().len();
+        let file_size = file.metadata()?.len();
 
         let file_path_len = file_path.len();
         let blk_index = file_path[file_path_len - 9..file_path_len - 4]
@@ -138,27 +138,58 @@ impl<'a> BlockReader<'a> {
 
         let mut reader = BufReader::new(XorReader::new(file, self.xor_key));
 
+        let mut time: u32 = 0;
+
         loop {
-            let magic = Magic::consensus_decode(&mut reader).unwrap();
+            let magic = Magic::consensus_decode(&mut reader)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
             if magic != MAGIC {
-                println!(
-                    "Magic is not correct in {} offset={}; got {}",
-                    file_path, offset, magic
-                );
-                return Err(Error::new(ErrorKind::Other, "Magic is not correct"));
+                // Bitcoin Core preallocates blk files: raw zero bytes (read
+                // here XORed with the key) mark the end of the written data
+                let zeros: [u8; 4] =
+                    std::array::from_fn(|i| self.xor_key[(offset as usize + i) % XOR_KEY_LEN]);
+                if magic.to_bytes() == zeros {
+                    if let Some(ref file_cb) = self.file_cb {
+                        file_cb(file_path.to_string(), self.height, time);
+                    }
+
+                    return Ok(true);
+                }
+
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Magic is not correct in {} offset={}; got {}",
+                        file_path, offset, magic
+                    ),
+                ));
             }
 
-            let size = u32::consensus_decode(&mut reader).unwrap() as usize;
+            let size = u32::consensus_decode(&mut reader)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?
+                as usize;
+
+            // At least a header, at most the maximum serialized block size
+            if !(80..=4_000_000).contains(&size) {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Invalid block size {} in {} offset={}",
+                        size, file_path, offset
+                    ),
+                ));
+            }
 
             // Read the block header
-            let header = Header::consensus_decode(&mut reader).unwrap();
+            let header = Header::consensus_decode(&mut reader)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
 
-            let time = header.time;
+            time = header.time;
             let height: u32 = self.height;
 
             // Skip the rest of the block
             let mut data = vec![0; size - 80];
-            reader.read_exact(&mut data).unwrap();
+            reader.read_exact(&mut data)?;
 
             // Insert the block into the index
             self.insert(LazyBlock {
