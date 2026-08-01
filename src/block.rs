@@ -21,6 +21,10 @@ static MAGIC: Magic = Magic::BITCOIN;
 
 use crate::chain::Chain;
 use crate::chain::GetBlockIds;
+use crate::xor::read_xor_key;
+use crate::xor::XorKey;
+use crate::xor::XorReader;
+use crate::xor::XOR_KEY_LEN;
 
 #[derive(Debug, Clone)]
 pub struct LazyBlock {
@@ -58,6 +62,7 @@ pub struct BlockReader<'call> {
     block_cb: Option<Box<dyn Fn(LazyBlock, u32) + 'call>>,
     file_cb: Option<Box<dyn Fn(String, u32, u32) + 'call>>,
     options: BlockReaderOptions,
+    xor_key: XorKey,
 }
 
 pub struct BlockReaderOptions {
@@ -86,6 +91,7 @@ impl<'a> BlockReader<'a> {
             block_cb: None,
             file_cb: None,
             options,
+            xor_key: [0; XOR_KEY_LEN],
         }
     }
 
@@ -130,7 +136,7 @@ impl<'a> BlockReader<'a> {
 
         let mut offset = 0; // Buffer offset
 
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::new(XorReader::new(file, self.xor_key));
 
         loop {
             let magic = Magic::consensus_decode(&mut reader).unwrap();
@@ -231,6 +237,8 @@ impl<'a> BlockReader<'a> {
     }
 
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {
+        self.xor_key = read_xor_key(dir_path)?;
+
         let entries = BlockReader::read_dir(&self, dir_path)?;
 
         for entry in entries {
