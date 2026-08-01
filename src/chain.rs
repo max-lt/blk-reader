@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::rc::Rc;
+use std::rc::Weak;
 
 pub trait GetBlockIds<Identifier> {
     fn get_block_id(&self) -> Identifier;
@@ -17,7 +18,8 @@ enum NextNode<Data> {
 #[derive(Debug, Clone)]
 pub struct Node<Data> {
     block: Option<Data>,
-    prev: Option<Rc<RefCell<Node<Data>>>>,
+    /// Weak to avoid reference cycles with the parent's `next` list
+    prev: Option<Weak<RefCell<Node<Data>>>>,
     next: Option<NextNode<Data>>,
 }
 
@@ -66,13 +68,14 @@ impl<D> Node<D> {
 
     // Extract all nodes recursively from the current node to the head
     fn extract_left(node: Rc<RefCell<Node<D>>>) -> Vec<Rc<RefCell<Node<D>>>> {
-        match &node.borrow().prev {
+        let prev = node.borrow().prev.as_ref().and_then(Weak::upgrade);
+        match prev {
             Some(prev) => {
-                let mut nodes = Node::extract_left(Rc::clone(prev));
-                nodes.push(Rc::clone(&node));
+                let mut nodes = Node::extract_left(prev);
+                nodes.push(node);
                 nodes
             }
-            None => vec![Rc::clone(&node)],
+            None => vec![node],
         }
     }
 
@@ -195,7 +198,7 @@ impl<I: PartialEq + Ord + Copy + Display, D: Clone + GetBlockIds<I>> Chain<I, D>
             Some(parent_node) => {
                 let node = Rc::new(RefCell::new(Node {
                     block: Some(block),
-                    prev: Some(parent_node.clone()),
+                    prev: Some(Rc::downgrade(parent_node)),
                     next: None,
                 }));
 
@@ -457,9 +460,13 @@ mod tests {
         // 1 -> 2 -> 3a -> 4 (3b is a shorter fork)
         assert_eq!(chain.longest_chain_depth(), 4);
 
+        let stale = Rc::downgrade(chain.nodes.get("3b").unwrap());
+
         assert_eq!(chain.pop_head().unwrap().block_id, "1");
-        assert_eq!(chain.pop_head().unwrap().block_id, "2");
         // Popping "2" discards the losing fork "3b"
+        assert_eq!(chain.pop_head().unwrap().block_id, "2");
+        assert!(stale.upgrade().is_none(), "discarded fork must be freed");
+
         assert_eq!(chain.pop_head().unwrap().block_id, "3a");
         assert_eq!(chain.pop_head().unwrap().block_id, "4");
         assert!(chain.pop_head().is_none());
