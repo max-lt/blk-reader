@@ -25,11 +25,21 @@ pub fn read_xor_key(blocks_dir: &std::path::Path) -> Result<XorKey, Error> {
 /// The buffer must start at position 0 of the file, so that the key
 /// alignment is preserved. A zero key leaves the buffer unchanged.
 pub fn xor_in_place(buf: &mut [u8], key: XorKey) {
+    xor_in_place_at(buf, key, 0);
+}
+
+/// Same as [`xor_in_place`] for a buffer starting at an arbitrary
+/// position in the file: the key is rotated to match the alignment.
+pub fn xor_in_place_at(buf: &mut [u8], key: XorKey, base_offset: u64) {
     if key == [0; XOR_KEY_LEN] {
         return;
     }
 
-    let key64 = u64::from_ne_bytes(key);
+    // Rotate the key so that index 0 matches base_offset
+    let rotated: XorKey =
+        std::array::from_fn(|i| key[(base_offset as usize + i) % XOR_KEY_LEN]);
+
+    let key64 = u64::from_ne_bytes(rotated);
     let mut chunks = buf.chunks_exact_mut(XOR_KEY_LEN);
     for chunk in &mut chunks {
         let word = u64::from_ne_bytes((&*chunk).try_into().unwrap()) ^ key64;
@@ -38,7 +48,7 @@ pub fn xor_in_place(buf: &mut [u8], key: XorKey) {
 
     // The remainder starts at a multiple of the key length
     for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
-        *byte ^= key[i % XOR_KEY_LEN];
+        *byte ^= rotated[i % XOR_KEY_LEN];
     }
 }
 
@@ -116,20 +126,22 @@ mod tests {
     fn xor_in_place_matches_bytewise_xor() {
         let key: XorKey = [0xde, 0xca, 0x6d, 0x01, 0x00, 0x56, 0x05, 0xe5];
 
-        // Lengths around the 8-byte boundary to exercise the remainder
-        for len in [0usize, 1, 7, 8, 9, 16, 23, 1000, 1001] {
-            let plain: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        // Lengths and offsets around the 8-byte boundary
+        for base in [0u64, 1, 5, 8, 13] {
+            for len in [0usize, 1, 7, 8, 9, 16, 23, 1000, 1001] {
+                let plain: Vec<u8> = (0..len).map(|i| i as u8).collect();
 
-            let mut fast = plain.clone();
-            xor_in_place(&mut fast, key);
+                let mut fast = plain.clone();
+                xor_in_place_at(&mut fast, key, base);
 
-            let bytewise: Vec<u8> = plain
-                .iter()
-                .enumerate()
-                .map(|(i, b)| b ^ key[i % XOR_KEY_LEN])
-                .collect();
+                let bytewise: Vec<u8> = plain
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| b ^ key[(base as usize + i) % XOR_KEY_LEN])
+                    .collect();
 
-            assert_eq!(fast, bytewise, "len={}", len);
+                assert_eq!(fast, bytewise, "base={} len={}", base, len);
+            }
         }
     }
 

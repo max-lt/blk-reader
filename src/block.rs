@@ -3,10 +3,15 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::io::Read as IoRead;
+use std::io::Seek;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use bitcoin::block::Header;
 use bitcoin::consensus::encode;
@@ -20,7 +25,7 @@ use bitcoin::Txid;
 use crate::chain::Chain;
 use crate::chain::GetBlockIds;
 use crate::xor::read_xor_key;
-use crate::xor::xor_in_place;
+use crate::xor::xor_in_place_at;
 use crate::xor::XorKey;
 use crate::xor::XOR_KEY_LEN;
 
@@ -110,6 +115,18 @@ pub struct BlockReaderOptions {
     /// Number of decoder threads (defaults to the available parallelism
     /// minus the reader and consumer threads, capped at 12)
     pub decode_workers: Option<usize>,
+    /// Chain root: blocks attach starting from the block whose prev hash
+    /// equals this id (defaults to all-zeros, i.e. the genesis block).
+    /// Set it to a known block hash to resume mid-chain with `start_at`.
+    pub root: Option<BlockHash>,
+    /// Start reading at this (blk file index, byte offset). Must point
+    /// at a record boundary.
+    pub start_at: Option<(u32, u64)>,
+    /// Keep polling for new blk data at this interval instead of
+    /// returning once the end of the files is reached. Partial records
+    /// at the tail are then treated as data-not-yet-written rather than
+    /// errors. Exit via `stop_flag`.
+    pub follow: Option<Duration>,
     pub stop_flag: Arc<AtomicBool>,
 }
 
@@ -121,16 +138,31 @@ impl Default for BlockReaderOptions {
             max_blk_files: None,
             magic: Magic::BITCOIN,
             decode_workers: None,
+            root: None,
+            start_at: None,
+            follow: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
+/// Parameters of the reader thread
+struct ReaderConfig {
+    dir: PathBuf,
+    xor_key: XorKey,
+    magic: Magic,
+    max_blk_files: Option<usize>,
+    start_at: Option<(u32, u64)>,
+    follow: Option<Duration>,
+}
+
 impl<'a> BlockReader<'a> {
     pub fn new(options: BlockReaderOptions) -> BlockReader<'a> {
+        let root = options.root.unwrap_or_else(BlockHash::all_zeros);
+
         BlockReader {
             height: 0,
-            chain: Chain::new(BlockHash::all_zeros()),
+            chain: Chain::new(root),
             block_cb: None,
             file_cb: None,
             options,
@@ -145,26 +177,6 @@ impl<'a> BlockReader<'a> {
         self.file_cb = Some(file_cb);
     }
 
-    /// Read the directory and return a list of files
-    fn read_dir(&self, dir_path: &std::path::Path) -> Result<Vec<String>, Error> {
-        let mut entries: Vec<String> = fs::read_dir(dir_path)?
-            .filter_map(Result::ok)
-            .map(|d| d.path())
-            .filter(|d| d.is_file() && d.extension().is_some())
-            .filter_map(|d| d.to_str().map(str::to_string))
-            .filter(|s| s.contains("/blk") && s.ends_with(".dat"))
-            .collect();
-
-        entries.sort();
-
-        match self.options.max_blk_files {
-            Some(max_blk_files) => entries.truncate(max_blk_files),
-            None => (),
-        }
-
-        return Ok(entries);
-    }
-
     /// Read the blk files of a directory through a three-stage pipeline:
     /// one reader thread (I/O + de-obfuscation + record splitting), a pool
     /// of decoder threads (transaction decoding + txid computation), and
@@ -173,7 +185,15 @@ impl<'a> BlockReader<'a> {
     /// callbacks are invoked in block height order on the calling thread.
     pub fn read(&mut self, dir_path: &std::path::Path) -> Result<(), Error> {
         let xor_key = read_xor_key(dir_path)?;
-        let entries = BlockReader::read_dir(&self, dir_path)?;
+
+        let reader_cfg = ReaderConfig {
+            dir: dir_path.to_path_buf(),
+            xor_key,
+            magic: self.options.magic,
+            max_blk_files: self.options.max_blk_files,
+            start_at: self.options.start_at,
+            follow: self.options.follow,
+        };
 
         let workers = self.options.decode_workers.unwrap_or_else(|| {
             thread::available_parallelism()
@@ -182,7 +202,6 @@ impl<'a> BlockReader<'a> {
                 .clamp(1, 12)
         });
 
-        let magic = self.options.magic;
         let stop_flag = Arc::clone(&self.options.stop_flag);
 
         thread::scope(|scope| {
@@ -193,7 +212,7 @@ impl<'a> BlockReader<'a> {
             {
                 let out_tx = out_tx.clone();
                 let stop_flag = Arc::clone(&stop_flag);
-                scope.spawn(move || read_files(entries, xor_key, magic, &stop_flag, raw_tx, out_tx));
+                scope.spawn(move || read_files(reader_cfg, &stop_flag, raw_tx, out_tx));
             }
 
             for _ in 0..workers {
@@ -303,91 +322,173 @@ impl<'a> BlockReader<'a> {
     }
 }
 
-/// Reader thread: read each blk file, split it into raw block records
-/// and queue them for the decoder pool
+/// List the blk files of a directory as (index, path), sorted
+fn scan_dir(dir: &Path, max_blk_files: Option<usize>) -> Result<Vec<(u32, String)>, Error> {
+    let mut entries: Vec<(u32, String)> = fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|d| d.path())
+        .filter(|p| p.is_file())
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?;
+            let index = name.strip_prefix("blk")?.strip_suffix(".dat")?.parse().ok()?;
+            Some((index, p.to_str()?.to_string()))
+        })
+        .collect();
+
+    entries.sort();
+
+    if let Some(max_blk_files) = max_blk_files {
+        entries.truncate(max_blk_files);
+    }
+
+    Ok(entries)
+}
+
+/// Reader thread: read the blk files, split them into raw block records
+/// and queue them for the decoder pool. In follow mode, keep polling the
+/// directory and the tail of the last file for new data.
 fn read_files(
-    entries: Vec<String>,
-    xor_key: XorKey,
-    magic: Magic,
+    cfg: ReaderConfig,
     stop_flag: &AtomicBool,
     raw_tx: mpsc::SyncSender<RawBlock>,
     out_tx: mpsc::SyncSender<Output>,
 ) {
-    for file_path in entries {
-        match read_file(&file_path, xor_key, magic, stop_flag, &raw_tx) {
-            Ok(()) => {
-                if out_tx.send(Output::FileDone(file_path)).is_err() {
-                    return;
-                }
-            }
-            Err(ReadStop::Stop) => return,
-            Err(ReadStop::Error(e)) => {
+    // Position of the next byte to read (file index, offset)
+    let mut pos: (u32, u64) = cfg.start_at.unwrap_or((0, 0));
+    // Last file for which FileDone was sent
+    let mut last_done: Option<u32> = None;
+
+    loop {
+        let entries = match scan_dir(&cfg.dir, cfg.max_blk_files) {
+            Ok(entries) => entries,
+            Err(e) => {
                 let _ = out_tx.send(Output::Error(e));
                 return;
             }
+        };
+
+        let last_index = entries.last().map(|(i, _)| *i).unwrap_or(0);
+
+        for (index, file_path) in entries.iter() {
+            if *index < pos.0 {
+                continue;
+            }
+
+            let start_offset = if *index == pos.0 { pos.1 } else { 0 };
+
+            match read_file(file_path, *index, start_offset, &cfg, stop_flag, &raw_tx) {
+                Ok(end_offset) => {
+                    pos = (*index, end_offset);
+
+                    // In follow mode the last file can still grow: hold its
+                    // FileDone until the next file appears (rollover)
+                    let is_final = cfg.follow.is_none() || *index < last_index;
+                    if is_final && last_done.map_or(true, |done| done < *index) {
+                        last_done = Some(*index);
+                        if out_tx.send(Output::FileDone(file_path.clone())).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(ReadStop::Stop) => return,
+                Err(ReadStop::Error(e)) => {
+                    let _ = out_tx.send(Output::Error(e));
+                    return;
+                }
+            }
+
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+
+        let Some(poll) = cfg.follow else {
+            return;
+        };
+
+        thread::sleep(poll);
+
+        if stop_flag.load(Ordering::Relaxed) {
+            return;
         }
     }
 }
 
-/// Read a single blk file and queue its raw block records
+/// Read a single blk file from `start_offset` and queue its raw block
+/// records. Returns the offset of the first byte not consumed: the end
+/// of the written data (zero tail), or the start of a partial record in
+/// follow mode (data still being written by the node).
 fn read_file(
     file_path: &str,
-    xor_key: XorKey,
-    magic: Magic,
+    blk_index: u32,
+    start_offset: u64,
+    cfg: &ReaderConfig,
     stop_flag: &AtomicBool,
     raw_tx: &mpsc::SyncSender<RawBlock>,
-) -> Result<(), ReadStop> {
-    let blk_index = std::path::Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("blk"))
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid blk file name: {}", file_path),
-            )
-        })?;
+) -> Result<u64, ReadStop> {
+    let mut file = fs::File::open(file_path)?;
+    if start_offset > 0 {
+        file.seek(std::io::SeekFrom::Start(start_offset))?;
+    }
 
-    let mut buf = fs::read(file_path)?;
-    xor_in_place(&mut buf, xor_key);
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    xor_in_place_at(&mut buf, cfg.xor_key, start_offset);
 
     let blk_path: Arc<str> = Arc::from(file_path);
-    let magic_bytes = magic.to_bytes();
+    let magic_bytes = cfg.magic.to_bytes();
+    let follow = cfg.follow.is_some();
 
-    let mut offset: usize = 0;
+    let mut offset: usize = 0; // relative to start_offset
 
-    while offset + 8 <= buf.len() {
+    loop {
+        let abs = start_offset + offset as u64;
+
+        if offset + 8 > buf.len() {
+            // Trailing bytes shorter than a record header: either the end
+            // of the file, or a record being written (follow catches up on
+            // the next poll)
+            return Ok(abs);
+        }
+
         if buf[offset..offset + 4] != magic_bytes {
             // Bitcoin Core preallocates blk files: raw zero bytes (XORed
             // with the key in `buf`) mark the end of the written data
-            let zeros: [u8; 4] = std::array::from_fn(|i| xor_key[(offset + i) % XOR_KEY_LEN]);
+            let zeros: [u8; 4] =
+                std::array::from_fn(|i| cfg.xor_key[(abs as usize + i) % XOR_KEY_LEN]);
             if buf[offset..offset + 4] == zeros {
-                return Ok(());
+                return Ok(abs);
             }
 
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("Magic is not correct in {} offset={}", file_path, offset),
+                format!("Magic is not correct in {} offset={}", file_path, abs),
             )
             .into());
         }
 
-        let size = u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let size =
+            u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().unwrap()) as usize;
 
         // At least a header, at most the maximum serialized block size
         if !(80..=4_000_000).contains(&size) {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("Invalid block size {} in {} offset={}", size, file_path, offset),
+                format!("Invalid block size {} in {} offset={}", size, file_path, abs),
             )
             .into());
         }
 
         if offset + 8 + size > buf.len() {
+            // Partial record at the tail: in follow mode the node is still
+            // writing it, retry from here on the next poll
+            if follow {
+                return Ok(abs);
+            }
+
             return Err(Error::new(
                 ErrorKind::UnexpectedEof,
-                format!("Truncated block in {} offset={}", file_path, offset),
+                format!("Truncated block in {} offset={}", file_path, abs),
             )
             .into());
         }
@@ -395,7 +496,7 @@ fn read_file(
         let raw = RawBlock {
             blk_index,
             blk_path: Arc::clone(&blk_path),
-            offset: offset as u64,
+            offset: abs,
             bytes: buf[offset + 8..offset + 8 + size].to_vec(),
         };
 
@@ -409,8 +510,6 @@ fn read_file(
             return Err(ReadStop::Stop);
         }
     }
-
-    Ok(())
 }
 
 /// Decoder thread: decode raw blocks and compute their txids
