@@ -103,6 +103,10 @@ pub struct BlockReader<'call> {
     chain: Chain<BlockHash, DecodedBlock>,
     block_cb: Option<Box<dyn Fn(DecodedBlock, u32) + 'call>>,
     file_cb: Option<Box<dyn Fn(String, u32, u32) + 'call>>,
+    /// Called after each insertion for every block of the buffered main
+    /// branch, oldest first, as (index, branch_len, block): a live
+    /// consumer rebuilds its unsealed-tip view from these calls
+    buffer_cb: Option<Box<dyn Fn(usize, usize, &DecodedBlock) + 'call>>,
     options: BlockReaderOptions,
 }
 
@@ -165,6 +169,7 @@ impl<'a> BlockReader<'a> {
             chain: Chain::new(root),
             block_cb: None,
             file_cb: None,
+            buffer_cb: None,
             options,
         }
     }
@@ -175,6 +180,10 @@ impl<'a> BlockReader<'a> {
 
     pub fn set_file_cb(&mut self, file_cb: Box<dyn Fn(String, u32, u32) + 'a>) {
         self.file_cb = Some(file_cb);
+    }
+
+    pub fn set_buffer_cb(&mut self, buffer_cb: Box<dyn Fn(usize, usize, &DecodedBlock) + 'a>) {
+        self.buffer_cb = Some(buffer_cb);
     }
 
     /// Read the blk files of a directory through a three-stage pipeline:
@@ -238,7 +247,21 @@ impl<'a> BlockReader<'a> {
                     }
                     Output::Block(block) => {
                         last_time = block.header.time;
+
                         self.insert(block);
+
+                        // Replay the buffered main branch to the live
+                        // consumer (sealed blocks already left the chain)
+                        if let Some(ref buffer_cb) = self.buffer_cb {
+                            let mut len = 0;
+                            self.chain.for_each_main(|_| len += 1);
+
+                            let mut index = 0;
+                            self.chain.for_each_main(|block| {
+                                buffer_cb(index, len, block);
+                                index += 1;
+                            });
+                        }
 
                         // Stop signal received
                         if stop_flag.load(Ordering::Relaxed) {

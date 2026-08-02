@@ -119,13 +119,26 @@ fn follow_growth_and_rollover() {
 
     let delivered: Arc<Mutex<Vec<(u32, BlockHash)>>> = Arc::new(Mutex::new(Vec::new()));
     let files_done: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let branch: Arc<Mutex<Vec<BlockHash>>> = Arc::new(Mutex::new(Vec::new()));
 
     let handle = {
         let dir = dir.clone();
         let delivered = Arc::clone(&delivered);
         let files_done = Arc::clone(&files_done);
+        let branch = Arc::clone(&branch);
         std::thread::spawn(move || {
             let mut reader = BlockReader::new(options);
+            reader.set_buffer_cb(Box::new({
+                let branch = Arc::clone(&branch);
+                move |index, len, block| {
+                    let mut branch = branch.lock().unwrap();
+                    if index == 0 {
+                        branch.clear();
+                    }
+                    branch.push(block.block_hash);
+                    assert!(branch.len() <= len);
+                }
+            }));
             reader.set_block_cb(Box::new({
                 let delivered = Arc::clone(&delivered);
                 move |block, height| {
@@ -169,6 +182,14 @@ fn follow_growth_and_rollover() {
     let files_done = files_done.lock().unwrap();
     assert_eq!(files_done.len(), 1);
     assert!(files_done[0].ends_with("blk00000.dat"));
+
+    // The last published branch is exactly the undelivered suffix
+    // (blocks 21..30), in chain order
+    let branch = branch.lock().unwrap();
+    assert_eq!(branch.len(), 9);
+    for (i, hash) in branch.iter().enumerate() {
+        assert_eq!(*hash, blocks[21 + i].block_hash(), "branch out of order");
+    }
 }
 
 #[test]

@@ -134,6 +134,32 @@ impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
         }
     }
 
+    /// Visit the blocks of the current main branch, oldest first
+    pub fn for_each_main(&self, mut visit: impl FnMut(&D)) {
+        let mut cursor = match &self.head {
+            Some(head) => Rc::clone(head),
+            None => return,
+        };
+
+        loop {
+            {
+                let node = cursor.borrow();
+                if let Some(block) = node.block.as_ref() {
+                    visit(block);
+                }
+                if node.next.is_none() {
+                    break;
+                }
+            }
+
+            let next = Node::longest_right(Rc::clone(&cursor));
+            if Rc::ptr_eq(&next, &cursor) {
+                break;
+            }
+            cursor = next;
+        }
+    }
+
     /// Identifier of the current head, i.e. the next block to be popped
     pub fn next_id(&self) -> I {
         match &self.head {
