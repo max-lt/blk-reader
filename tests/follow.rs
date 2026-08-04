@@ -231,3 +231,52 @@ fn resume_with_root_and_start_at() {
     assert_eq!(delivered[0].0, 0);
     assert_eq!(delivered[0].1, blocks[20].block_hash());
 }
+
+#[test]
+fn stale_fork_reporting() {
+    let dir = temp_dir("stale");
+    let blocks = make_chain(25);
+
+    // A losing fork of two blocks off block 4
+    let fork1 = make_block(blocks[4].block_hash(), 1000);
+    let fork2 = make_block(fork1.block_hash(), 1001);
+
+    let mut data: Vec<u8> = Vec::new();
+    for (i, block) in blocks.iter().enumerate() {
+        data.extend(record(block));
+
+        // The fork shows up shortly after the branch point
+        if i == 6 {
+            data.extend(record(&fork1));
+            data.extend(record(&fork2));
+        }
+    }
+    write_atomic(&dir.join("blk00000.dat"), &data);
+
+    let sealed = std::cell::RefCell::new(Vec::<(u32, BlockHash)>::new());
+    let stales = std::cell::RefCell::new(Vec::<BlockHash>::new());
+
+    let mut reader = BlockReader::new(BlockReaderOptions::default());
+    reader.set_block_cb(Box::new(|block, height| {
+        sealed.borrow_mut().push((height, block.block_hash));
+    }));
+    reader.set_stale_cb(Box::new(|block| {
+        stales.borrow_mut().push(block.block_hash);
+    }));
+    reader.read(&dir).unwrap();
+    drop(reader);
+
+    let sealed = sealed.into_inner();
+    let stales = stales.into_inner();
+
+    // The main branch alone gets sealed, in order
+    assert_eq!(sealed[4], (4, blocks[4].block_hash()));
+    assert!(sealed.iter().all(|(h, hash)| blocks[*h as usize].block_hash() == *hash));
+
+    // Both fork blocks reported once the branch point settled, and the
+    // report came after the winning block at the same height
+    assert_eq!(stales.len(), 2);
+    assert!(stales.contains(&fork1.block_hash()));
+    assert!(stales.contains(&fork2.block_hash()));
+    assert!(sealed.iter().any(|(h, _)| *h >= 5), "fork point settled");
+}

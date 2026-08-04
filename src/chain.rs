@@ -30,6 +30,9 @@ pub struct Chain<I, D> {
     /// Blocks whose parent is not known yet, keyed by parent id.
     /// Competing blocks can share the same parent, hence the Vec.
     orphans: BTreeMap<I, Vec<D>>,
+    /// Blocks of losing forks, collected when `pop_head` settles a
+    /// branch point. Drain with `take_discarded`.
+    discarded: Vec<D>,
     genesis_identifier: I,
 }
 
@@ -130,6 +133,7 @@ impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
             head: None,
             orphans: BTreeMap::new(),
             nodes: BTreeMap::new(),
+            discarded: Vec::new(),
             genesis_identifier,
         }
     }
@@ -195,6 +199,12 @@ impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
 
     pub fn orphans(&self) -> usize {
         self.orphans.values().map(Vec::len).sum()
+    }
+
+    /// Blocks discarded by `pop_head` since the last call: the stale
+    /// side of settled branch points, oldest first
+    pub fn take_discarded(&mut self) -> Vec<D> {
+        std::mem::take(&mut self.discarded)
     }
 
     pub fn insert(&mut self, block: D) {
@@ -309,10 +319,12 @@ impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
                             continue;
                         }
 
-                        // Discard the losing fork
+                        // Discard the losing fork, keeping its blocks
+                        // for the caller (stale-block reporting)
                         for node in Node::extract_right(Rc::clone(node)).iter() {
-                            let node_id = node.borrow().block.as_ref().unwrap().get_block_id();
-                            self.nodes.remove(&node_id);
+                            let block = node.borrow_mut().block.take().unwrap();
+                            self.nodes.remove(&block.get_block_id());
+                            self.discarded.push(block);
                         }
                     }
 
@@ -495,9 +507,16 @@ mod tests {
         let stale = Rc::downgrade(chain.nodes.get("3b").unwrap());
 
         assert_eq!(chain.pop_head().unwrap().block_id, "1");
+        assert!(chain.take_discarded().is_empty());
+
         // Popping "2" discards the losing fork "3b"
         assert_eq!(chain.pop_head().unwrap().block_id, "2");
         assert!(stale.upgrade().is_none(), "discarded fork must be freed");
+
+        let discarded = chain.take_discarded();
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].block_id, "3b");
+        assert!(chain.take_discarded().is_empty(), "drained once");
 
         assert_eq!(chain.pop_head().unwrap().block_id, "3a");
         assert_eq!(chain.pop_head().unwrap().block_id, "4");

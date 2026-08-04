@@ -107,6 +107,9 @@ pub struct BlockReader<'call> {
     /// branch, oldest first, as (index, branch_len, block): a live
     /// consumer rebuilds its unsealed-tip view from these calls
     buffer_cb: Option<Box<dyn Fn(usize, usize, &DecodedBlock) + 'call>>,
+    /// Called with each block of a losing fork once its branch point is
+    /// settled, after the winning block's own callback
+    stale_cb: Option<Box<dyn Fn(DecodedBlock) + 'call>>,
     options: BlockReaderOptions,
 }
 
@@ -170,6 +173,7 @@ impl<'a> BlockReader<'a> {
             block_cb: None,
             file_cb: None,
             buffer_cb: None,
+            stale_cb: None,
             options,
         }
     }
@@ -184,6 +188,14 @@ impl<'a> BlockReader<'a> {
 
     pub fn set_buffer_cb(&mut self, buffer_cb: Box<dyn Fn(usize, usize, &DecodedBlock) + 'a>) {
         self.buffer_cb = Some(buffer_cb);
+    }
+
+    /// Called with each block of a losing fork once its branch point is
+    /// settled (the winning side got buried deep enough to be sealed).
+    /// Runs after the sealed block's own callback, so the fork point is
+    /// already known to the consumer.
+    pub fn set_stale_cb(&mut self, stale_cb: Box<dyn Fn(DecodedBlock) + 'a>) {
+        self.stale_cb = Some(stale_cb);
     }
 
     /// Read the blk files of a directory through a three-stage pipeline:
@@ -300,6 +312,15 @@ impl<'a> BlockReader<'a> {
             match self.chain.pop_head() {
                 Some(block) => {
                     self.push_block(block);
+
+                    // Settling this block may have discarded a losing
+                    // fork: report it after the winner
+                    if let Some(ref stale_cb) = self.stale_cb {
+                        for stale in self.chain.take_discarded() {
+                            stale_cb(stale);
+                        }
+                    }
+
                     if self.max_height_reached() {
                         return;
                     }
