@@ -82,26 +82,22 @@ impl<D> Node<D> {
         }
     }
 
-    // Extract all nodes recursively from the current node to the tails
+    // Extract all nodes recursively from the current node to the tails,
+    // each parent before its children
     fn extract_right(node: Rc<RefCell<Node<D>>>) -> Vec<Rc<RefCell<Node<D>>>> {
+        let mut all_nodes = vec![Rc::clone(&node)];
         match &node.borrow().next {
-            Some(next) => match next {
-                NextNode::Single(next) => {
-                    let mut nodes = Node::extract_right(Rc::clone(next));
-                    nodes.push(Rc::clone(&node));
-                    nodes
+            Some(NextNode::Single(next)) => {
+                all_nodes.append(&mut Node::extract_right(Rc::clone(next)));
+            }
+            Some(NextNode::Multiple(nodes)) => {
+                for next in nodes.iter() {
+                    all_nodes.append(&mut Node::extract_right(Rc::clone(next)));
                 }
-                NextNode::Multiple(nodes) => {
-                    let mut all_nodes = vec![Rc::clone(&node)];
-                    for next in nodes.iter() {
-                        let mut nodes = Node::extract_right(Rc::clone(next));
-                        all_nodes.append(&mut nodes);
-                    }
-                    all_nodes
-                }
-            },
-            None => vec![Rc::clone(&node)],
+            }
+            None => {}
         }
+        all_nodes
     }
 
     /// Extract the tail of longest chain from the current node
@@ -202,7 +198,7 @@ impl<I: Ord + Copy, D: GetBlockIds<I>> Chain<I, D> {
     }
 
     /// Blocks discarded by `pop_head` since the last call: the stale
-    /// side of settled branch points, oldest first
+    /// side of settled branch points, each parent before its children
     pub fn take_discarded(&mut self) -> Vec<D> {
         std::mem::take(&mut self.discarded)
     }
@@ -521,5 +517,30 @@ mod tests {
         assert_eq!(chain.pop_head().unwrap().block_id, "3a");
         assert_eq!(chain.pop_head().unwrap().block_id, "4");
         assert!(chain.pop_head().is_none());
+    }
+
+    #[test]
+    fn test_discarded_fork_order() {
+        let mut chain = Chain::new("genesis-identifier");
+
+        chain.insert(Block::new("1", "genesis-identifier"));
+        chain.insert(Block::new("2", "1"));
+
+        // Losing fork of 3 blocks, with a split at its second block
+        chain.insert(Block::new("3b", "2"));
+        chain.insert(Block::new("4b", "3b"));
+        chain.insert(Block::new("5b", "4b"));
+        chain.insert(Block::new("5c", "4b"));
+
+        // Winning branch, one block longer
+        for (id, prev) in [("3a", "2"), ("4a", "3a"), ("5a", "4a"), ("6a", "5a")] {
+            chain.insert(Block::new(id, prev));
+        }
+
+        assert_eq!(chain.pop_head().unwrap().block_id, "1");
+        assert_eq!(chain.pop_head().unwrap().block_id, "2");
+
+        let ids: Vec<&str> = chain.take_discarded().iter().map(|b| b.block_id).collect();
+        assert_eq!(ids, ["3b", "4b", "5b", "5c"]);
     }
 }
