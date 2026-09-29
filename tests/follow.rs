@@ -233,6 +233,37 @@ fn resume_with_root_and_start_at() {
 }
 
 #[test]
+fn resume_skips_known_blocks() {
+    let dir = temp_dir("resume-skip");
+    let blocks = make_chain(30);
+    let data: Vec<u8> = blocks.iter().flat_map(record).collect();
+    write_atomic(&dir.join("blk00000.dat"), &data);
+
+    // Resume at block 20, re-reading the whole file: blocks 0..20 are
+    // below the root and can never attach
+    let options = BlockReaderOptions {
+        root: Some(blocks[19].block_hash()),
+        start_at: Some((0, 0)),
+        max_orphans: None,
+        ..Default::default()
+    };
+
+    let known: Vec<BlockHash> = blocks[..20].iter().map(|b| b.block_hash()).collect();
+    let delivered: Arc<Mutex<Vec<BlockHash>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let mut reader = BlockReader::new(options);
+    reader.set_skip_cb(Box::new(move |hash| known.contains(hash)));
+    reader.set_block_cb(Box::new({
+        let delivered = Arc::clone(&delivered);
+        move |block, _height| delivered.lock().unwrap().push(block.block_hash)
+    }));
+    reader.read(&dir).unwrap();
+
+    assert_eq!(reader.orphans(), 0);
+    assert_eq!(*delivered.lock().unwrap(), vec![blocks[20].block_hash()]);
+}
+
+#[test]
 fn stale_fork_reporting() {
     let dir = temp_dir("stale");
     let blocks = make_chain(25);

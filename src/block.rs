@@ -110,8 +110,12 @@ pub struct BlockReader<'call> {
     /// Called with each block of a losing fork once its branch point is
     /// settled, after the winning block's own callback
     stale_cb: Option<Box<dyn Fn(DecodedBlock) + 'call>>,
+    skip_cb: Option<SkipCb<'call>>,
     options: BlockReaderOptions,
 }
+
+/// Runs on the decoder threads, hence Send + Sync
+type SkipCb<'call> = Box<dyn Fn(&BlockHash) -> bool + Send + Sync + 'call>;
 
 pub struct BlockReaderOptions {
     pub max_blocks: Option<u32>,
@@ -174,6 +178,7 @@ impl<'a> BlockReader<'a> {
             file_cb: None,
             buffer_cb: None,
             stale_cb: None,
+            skip_cb: None,
             options,
         }
     }
@@ -196,6 +201,15 @@ impl<'a> BlockReader<'a> {
     /// already known to the consumer.
     pub fn set_stale_cb(&mut self, stale_cb: Box<dyn Fn(DecodedBlock) + 'a>) {
         self.stale_cb = Some(stale_cb);
+    }
+
+    /// Called by the decoder threads with the hash of each block, before
+    /// the block is decoded. A block for which it returns true is dropped:
+    /// it never reaches the chain or the other callbacks. When resuming,
+    /// it keeps the already processed blocks of the re-read window out of
+    /// the orphan list, where they would stay until the end of the read.
+    pub fn set_skip_cb(&mut self, skip_cb: SkipCb<'a>) {
+        self.skip_cb = Some(skip_cb);
     }
 
     /// Read the blk files of a directory through a three-stage pipeline:
@@ -225,7 +239,12 @@ impl<'a> BlockReader<'a> {
 
         let stop_flag = Arc::clone(&self.options.stop_flag);
 
-        thread::scope(|scope| {
+        // The decoder threads borrow the skip callback while the consumer
+        // loop borrows self mutably, so it leaves self for the read
+        let skip_cb = self.skip_cb.take();
+        let skip = skip_cb.as_deref();
+
+        let result = thread::scope(|scope| {
             let (raw_tx, raw_rx) = mpsc::sync_channel::<RawBlock>(RAW_CHANNEL_CAP);
             let (out_tx, out_rx) = mpsc::sync_channel::<Output>(OUT_CHANNEL_CAP);
             let raw_rx = Arc::new(Mutex::new(raw_rx));
@@ -239,7 +258,7 @@ impl<'a> BlockReader<'a> {
             for _ in 0..workers {
                 let raw_rx = Arc::clone(&raw_rx);
                 let out_tx = out_tx.clone();
-                scope.spawn(move || decode_worker(raw_rx, out_tx));
+                scope.spawn(move || decode_worker(raw_rx, out_tx, skip));
             }
 
             // The consumer only reads from the workers and the reader
@@ -301,7 +320,10 @@ impl<'a> BlockReader<'a> {
             }
 
             Ok(())
-        })
+        });
+
+        self.skip_cb = skip_cb;
+        result
     }
 
     /// Insert a block into the index
@@ -557,7 +579,11 @@ fn read_file(
 }
 
 /// Decoder thread: decode raw blocks and compute their txids
-fn decode_worker(raw_rx: Arc<Mutex<mpsc::Receiver<RawBlock>>>, out_tx: mpsc::SyncSender<Output>) {
+fn decode_worker(
+    raw_rx: Arc<Mutex<mpsc::Receiver<RawBlock>>>,
+    out_tx: mpsc::SyncSender<Output>,
+    skip: Option<&(dyn Fn(&BlockHash) -> bool + Send + Sync)>,
+) {
     loop {
         // Holding the lock while waiting is fine: it makes the idle
         // workers queue on the mutex instead of the channel
@@ -565,6 +591,16 @@ fn decode_worker(raw_rx: Arc<Mutex<mpsc::Receiver<RawBlock>>>, out_tx: mpsc::Syn
             Ok(raw) => raw,
             Err(_) => return, // reader is done
         };
+
+        // A header that does not decode goes on to decode(), which
+        // reports the error
+        if let Some(skip) = skip {
+            if let Ok(header) = encode::deserialize::<Header>(&raw.bytes[..raw.bytes.len().min(80)]) {
+                if skip(&header.block_hash()) {
+                    continue;
+                }
+            }
+        }
 
         let output = match decode(raw) {
             Ok(block) => Output::Block(block),
